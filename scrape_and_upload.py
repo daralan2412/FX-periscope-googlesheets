@@ -9,24 +9,34 @@ Target: Google Sheet "2026_RAW_MISSIONS", tab "DATA"
         via the Apps Script Web App (SHEETS_WEBAPP_URL / WEBAPP_TOKEN secrets).
 
 Flow:
-  1. GET  {SHEETS_WEBAPP_URL}?token=...  -> {"success": true, "next_date": "YYYY-MM-DD" | null}
-  2. If next_date is null, the pull buffer isn't satisfied yet -> exit 0, no-op.
-  3. Open REP-1901, set the Date Range filter to a single day (next_date to
-     next_date) via the "Custom Range" option, then use the widget's own
-     "Download Data" CSV export (NOT DOM scraping - the Data table is a
-     virtualized Sisense grid, so most rows/columns are never in the DOM at
-     once; the CSV export is generated server-side and is complete).
-  4. POST {"date": next_date, "rows": [[...35 cols...], ...]} to the Web App,
-     which appends the rows and advances lastProcessedDate.
+  1. Open REP-1901, set the Date Range filter to "Current Week" (not a single
+     day), then use the widget's own "Download Data" CSV export (NOT DOM
+     scraping - the Data table is a virtualized Sisense grid, so most
+     rows/columns are never in the DOM at once; the CSV export is generated
+     server-side and is complete).
+  2. POST {"rows": [[...35 cols...], ...]} to the Web App, which appends the
+     rows to the DATA tab and then dedupes the whole tab by mission_sas_id
+     (column A), keeping the most-recently-posted row per mission.
 
-Rebuilt 2026-08-30 after the first live run failed: the original version
-DOM-scraped a "table tbody tr" selector that does not exist on this page
-(the Data widget is a div-based Sisense "ninja-grid", not an HTML table),
-so it silently scraped an unrelated table and posted malformed rows, which
-crashed the Apps Script doPost() (setValues() column-count mismatch) and
-came back as a non-JSON error page. The CSV export path used here reads
-the exact same 35 columns, in the same order, as the target sheet's
-header row - confirmed live against the deployed report.
+Rebuilt 2026-08-30 (v3): switched from a single-day pull tracked by a
+lastProcessedDate watermark (first D-1, then D0) to always pulling
+Periscope's "Current Week" filter, run twice a day (7am/7pm Asia/Taipei).
+Current Week necessarily re-scrapes rows already in the sheet on every run
+(and a mission's own fields - times, task columns - can fill in after it
+was first logged), so there is no watermark anymore: every run re-syncs the
+whole current week, and the Apps Script side is responsible for collapsing
+duplicate mission_sas_id rows down to the freshest one. See Code.gs for the
+dedup logic.
+
+Rebuilt 2026-08-30 (v2, superseded by the above) after the first live run
+failed: the original version DOM-scraped a "table tbody tr" selector that
+does not exist on this page (the Data widget is a div-based Sisense
+"ninja-grid", not an HTML table), so it silently scraped an unrelated table
+and posted malformed rows, which crashed the Apps Script doPost()
+(setValues() column-count mismatch) and came back as a non-JSON error page.
+The CSV export path used here reads the exact same 35 columns, in the same
+order, as the target sheet's header row - confirmed live against the
+deployed report.
 """
 
 import csv
@@ -53,31 +63,33 @@ HEADERS = [
 ]
 
 
-def get_next_date():
+def check_token():
+    """Cheap pre-flight auth check before paying for a headless-browser scrape.
+
+    doGet() no longer decides what to pull (there's no watermark anymore),
+    it's just a token/connectivity health check now.
+    """
     resp = requests.get(WEBAPP_URL, params={"token": WEBAPP_TOKEN}, timeout=30)
     resp.raise_for_status()
     data = resp.json()
     if not data.get("success"):
-        raise RuntimeError(f"Web App GET failed: {data}")
-    return data.get("next_date")
+        raise RuntimeError(f"Web App auth check failed: {data}")
 
 
-def scrape_day_csv(target_date: str):
-    """Filter REP-1901's Data widget to a single day and pull its CSV export.
+def scrape_current_week_csv():
+    """Filter REP-1901's Data widget to "Current Week" and pull its CSV export.
 
     Uses the widget's built-in "Download Data" export instead of scraping the
     DOM: the Data widget is a virtualized grid (rows AND columns are only
     rendered near the viewport), so a DOM scrape would silently miss most of
-    a real day's rows/columns. The CSV export is generated server-side and
+    a real week's rows/columns. The CSV export is generated server-side and
     is complete regardless of what happened to be scrolled into view.
 
     Returns the CSV text, or None if the widget shows "Query returned no
-    matching rows" for target_date (this happens for "today" under a D0
-    pull buffer, early in the day before any ops have been logged yet -
-    Sisense doesn't even offer a "Download Data" menu item when there's
-    nothing to export, so this has to be checked for explicitly rather than
-    treated as a scrape failure). Caller decides what a None means (skip
-    posting, don't advance lastProcessedDate, retry next run).
+    matching rows" (e.g. very early Monday morning before anything has been
+    logged yet this week) - Sisense doesn't even offer a "Download Data"
+    menu item when there's nothing to export, so this has to be checked for
+    explicitly rather than treated as a scrape failure.
     """
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -104,24 +116,20 @@ def scrape_day_csv(target_date: str):
 
             # Open the report-level filters panel.
             page.locator(".filters-bar-label").first.click()
-            page.wait_for_selector(".custom-date-option", timeout=10_000)
+            page.wait_for_selector(".radio-button-group", timeout=10_000)
             page.wait_for_timeout(300)
 
-            # Date Range column: select "Custom Range" to reveal Start/End Date.
-            page.locator(".custom-date-option").first.click()
-            page.wait_for_selector("input[placeholder='Start Date']", timeout=10_000)
+            # Date Range column: select "Current Week" (label text is
+            # actually "Current Week (DEFAULT)" - has_text does a substring
+            # match, and no other option's label contains "Current Week").
+            # force=True because a plain click here can hit the same
+            # transient-overlap issue seen on the Start/End Date inputs when
+            # this panel was used for Custom Range (a sibling radio-button
+            # element intermittently intercepts pointer events while the
+            # panel settles).
+            current_week_option = page.locator(".radio-button-group .small-radio-button", has_text="Current Week").first
+            current_week_option.click(force=True)
             page.wait_for_timeout(300)
-
-            # A radio-button element in the same panel intermittently overlaps
-            # these inputs (visually settled, but still "receives pointer
-            # events" per Playwright's actionability check), so a plain
-            # .click() can retry for the full 30s timeout and fail. force=True
-            # skips that receives-events check and fills directly - safe here
-            # since we already waited for the input to exist and be enabled.
-            start_input = page.get_by_placeholder("Start Date")
-            end_input = page.get_by_placeholder("End Date")
-            start_input.fill(target_date, force=True)
-            end_input.fill(target_date, force=True)
 
             # Apply the filter and let the widget refresh.
             apply_button = page.locator(".apply-button")
@@ -134,11 +142,10 @@ def scrape_day_csv(target_date: str):
             widget = page.locator(".widget-container", has=page.locator(".widget-title", has_text="Data")).first
             widget.scroll_into_view_if_needed()
 
-            # No rows for this date yet (common for "today" under D0, before
-            # ops have logged anything) - Sisense shows this in place of the
-            # grid and doesn't offer a "Download Data" menu item at all, so
-            # check for it up front instead of timing out waiting for a menu
-            # that will never appear.
+            # No rows for the current week yet - Sisense shows this in place
+            # of the grid and doesn't offer a "Download Data" menu item at
+            # all, so check for it up front instead of timing out waiting
+            # for a menu that will never appear.
             if widget.locator(".error-message", has_text="no matching rows").count() > 0:
                 browser.close()
                 return None
@@ -208,11 +215,11 @@ def parse_csv_rows(csv_text: str):
     return rows
 
 
-def post_rows(target_date: str, rows: list):
+def post_rows(rows: list):
     resp = requests.post(
         WEBAPP_URL,
         params={"token": WEBAPP_TOKEN},
-        data=json.dumps({"date": target_date, "rows": rows}),
+        data=json.dumps({"rows": rows}),
         headers={"Content-Type": "application/json"},
         timeout=60,
     )
@@ -224,26 +231,22 @@ def post_rows(target_date: str, rows: list):
 
 
 def main():
-    next_date = get_next_date()
-    if not next_date:
-        print("Nothing due yet (pull buffer not satisfied, Asia/Taipei calendar). Exiting.")
-        return
+    check_token()
 
-    print(f"Pulling Periscope REP-1901 data for {next_date} (Asia/Taipei)...")
-    csv_text = scrape_day_csv(next_date)
+    print("Pulling Periscope REP-1901 current-week data (Asia/Taipei)...")
+    csv_text = scrape_current_week_csv()
     if csv_text is None:
-        # No rows logged for this date yet (e.g. "today" under D0, early in
-        # the day). Don't post, don't advance lastProcessedDate - exit 0 so
-        # this isn't treated as a failure, and the same date is retried next
-        # run once real data exists.
-        print(f"No rows yet for {next_date} - nothing to pull. Will retry next run.")
+        print("No rows yet for the current week - nothing to pull. Will retry next run.")
         return
 
     rows = parse_csv_rows(csv_text)
-    print(f"Scraped {len(rows)} rows for {next_date}.")
+    print(f"Scraped {len(rows)} rows for the current week.")
 
-    result = post_rows(next_date, rows)
-    print(f"Wrote {result.get('rows_written')} rows for {next_date}. lastProcessedDate advanced.")
+    result = post_rows(rows)
+    print(
+        f"Posted {result.get('rows_received')} rows; "
+        f"{result.get('duplicates_removed')} duplicate mission_sas_id row(s) removed on the sheet side."
+    )
 
 
 if __name__ == "__main__":

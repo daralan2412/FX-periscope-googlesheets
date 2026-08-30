@@ -16,49 +16,31 @@ that pipeline keeps feeding the old MISSIONS/WC_PAX tab exactly as before.
   order. A separate "SOURCE" tab in that sheet already notes the Periscope
   link — this pipeline is what actually keeps "DATA" filled in.
 
-## Assumptions made building this (please correct any that are wrong)
+## How it pulls data (v3, 2026-08-30)
 
-Only one of the four setup questions got an explicit answer from you: **pull
-buffer, cron at 7:00 AM — and since this data is all TPE-station ramp ops, I
-anchored "today" and the cron to Asia/Taipei, not America/Bogota.** Buffer was
-originally D-1, changed to D0 (same-day pull allowed) on 2026-08-30 per
-explicit instruction. The rest default to the recommended option since they
-weren't answered:
+Every run:
 
-1. **Deployment path**: I have no GitHub or Google login from this session
-   (verified — both loaded logged-out), so I can't push a repo or deploy the
-   Web App myself. This is delivered as ready-to-deploy files for you to set
-   up (see steps below). If you'd rather I drive it directly, log into
-   GitHub and Google in the linked browser and tell me — I can then create
-   the repo and deploy the Apps Script project myself.
-2. **Repo name**: assumed `periscope-ramp-to-sheets` under the same
-   `daralan2412` account. Rename/move it if you want it elsewhere.
-3. **Starting point**: the DATA tab already has ~20 rows for Aug 3–5, 2026,
-   several with placeholder `job_name` values like `"test"` — these look
-   like manual test entries, not a real pull. I left them alone and did
-   **not** set `lastProcessedDate` for you — you must seed it manually (see
-   step 4 below) before the first run, choosing whichever date makes sense:
-   the day before the oldest real day you want pulled, or the day before
-   today for a "start fresh, no backfill" approach.
+1. Opens REP-1901 and sets the Date Range filter to **"Current Week"**
+   (Sisense's own Sun/Mon–today rolling window), not a single day.
+2. Uses the "Data" widget's own **"Download Data"** CSV export (not DOM
+   scraping — the grid is virtualized, so a DOM scrape would silently miss
+   rows/columns outside the current viewport).
+3. POSTs every row to the Apps Script Web App, which appends them to DATA
+   and then **dedupes the whole tab by `mission_sas_id`** (column A),
+   keeping the most-recently-posted row per mission and deleting older
+   duplicates. This matters because Current Week re-scrapes the same
+   missions on every run, and Periscope can fill in a mission's own fields
+   (times, task columns) after it was first logged — "last wins" keeps the
+   sheet holding the freshest version of each mission's row.
 
-## What I could NOT verify (be aware before the first live run)
+There's no date watermark anymore (earlier versions tracked a
+`lastProcessedDate` Script Property for a D-1, then D0, single-day pull —
+see version history in `apps-script/Code.gs` if you're curious). Every run
+just re-syncs the current week and lets the dedup step keep things clean.
 
-The Periscope report's date-range filter (`Start Date`/`End Date` textboxes)
-and its "Data" table were confirmed live in a browser at build time, but only
-against a small, unfiltered sample (~12 rows, no date filter applied). I did
-**not** verify:
-
-- Whether the "Data" table virtualizes/lazy-loads rows once a full day's
-  volume (the old pipeline saw 400–2,400 rows/day) is rendered — the scraper
-  scrolls and re-collects to handle that, but it's untested at that volume.
-- The exact table CSS selector under load (`scrape_and_upload.py` uses the
-  generic `table` selector, marked `TODO-VERIFY` in the code).
-- Whether REP-1901 ever shows a password gate under different conditions
-  (the old report did; this one didn't when tested).
-
-Recommend running the workflow once via `workflow_dispatch` against a known
-day and manually checking the row count in Periscope's UI against what
-landed in the sheet before trusting the daily cron.
+**Schedule**: twice a day, Asia/Taipei time — 7:00 AM and 7:00 PM
+(`.github/workflows/run.yml`; TPE has no DST, so the UTC offset is constant
+year-round).
 
 ## Setup steps
 
@@ -68,9 +50,17 @@ landed in the sheet before trusting the daily cron.
      `apps-script/appsscript.json` via Project Settings > "Show appsscript.json".
    - Project Settings > Script Properties, add:
      - `AUTH_TOKEN` = a random secret string you generate (e.g. `openssl rand -hex 16`).
-     - `lastProcessedDate` = `YYYY-MM-DD`, the day BEFORE you want the first pull.
+       (No `lastProcessedDate` needed anymore — v3 has no watermark.)
    - Deploy > New deployment > Web app. Execute as "Me", access "Anyone".
      Copy the `/exec` URL.
+   - **If you're updating an existing deployment** rather than creating a
+     new one: Apps Script Web Apps published via "New deployment" are
+     pinned to a specific saved version — editing and saving `Code.gs` in
+     the editor does NOT change what the live `/exec` URL serves. You must
+     go to Deploy > Manage deployments > (pencil/edit icon) > Version >
+     "New version" > Deploy for a code change to actually reach the live
+     endpoint. (Learned the hard way on 2026-08-30: two rounds of fixes sat
+     unpublished on HEAD for a while before this was caught.)
 
 2. **GitHub (this repo)**
    - Create the repo (default assumed: `daralan2412/periscope-ramp-to-sheets`).
@@ -84,15 +74,23 @@ landed in the sheet before trusting the daily cron.
    - Actions tab > "Pull Periscope Ramp Ops (REP-1901) to Google Sheet" >
      Run workflow (manual `workflow_dispatch`), rather than waiting for the
      cron, so you can watch the log and check the sheet afterward.
-   - After it succeeds, the daily cron (`0 23 * * *` UTC = 7:00 AM
-     Asia/Taipei) takes over automatically.
+   - After it succeeds, the twice-daily cron (7am/7pm Asia/Taipei) takes
+     over automatically.
+
+## Known edge case
+
+If Periscope shows "Query returned no matching rows" for the current week
+(e.g. very early Monday before anything's been logged), there's no
+"Download Data" menu to click at all. The scraper detects this up front and
+exits cleanly with "No rows yet... Will retry next run" rather than failing
+— nothing is posted, so there's nothing to dedupe either.
 
 ## Files
 
-- `apps-script/Code.gs` — the Web App: `doGet` returns the next date to pull
-  (D0 buffer, Asia/Taipei calendar); `doPost` appends that date's rows to
-  the DATA tab and advances `lastProcessedDate`.
-- `scrape_and_upload.py` — calls the Web App, scrapes REP-1901 for the
-  target date via Playwright, posts the rows back.
-- `.github/workflows/run.yml` — daily cron + manual trigger.
+- `apps-script/Code.gs` — the Web App: `doGet` is now just a token/health
+  check; `doPost` appends posted rows to DATA and dedupes the tab by
+  `mission_sas_id`, keeping the freshest row per mission.
+- `scrape_and_upload.py` — scrapes REP-1901's Current Week CSV export via
+  Playwright, posts the rows to the Web App.
+- `.github/workflows/run.yml` — 7am + 7pm Asia/Taipei cron, plus manual trigger.
 - `requirements.txt` — `requests`, `playwright`.
