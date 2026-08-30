@@ -73,38 +73,11 @@ def scrape_day_csv(target_date: str) -> str:
     """
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page()
-        page.goto(PERISCOPE_URL, wait_until="networkidle", timeout=60_000)
+        page = browser.new_page(viewport={"width": 1600, "height": 1000})
 
-        # Open the report-level filters panel.
-        page.locator(".filters-bar-label").first.click()
-        page.wait_for_timeout(500)
-
-        # Date Range column: select "Custom Range" to reveal Start/End Date.
-        page.locator(".custom-date-option").first.click()
-        page.wait_for_timeout(300)
-
-        start_input = page.get_by_placeholder("Start Date")
-        end_input = page.get_by_placeholder("End Date")
-        start_input.fill(target_date)
-        end_input.fill(target_date)
-
-        # Apply the filter and let the widget refresh.
-        page.locator(".apply-button").click()
-        page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(1500)
-
-        # Find the "Data" widget specifically (report may gain more widgets
-        # later) and open its per-widget menu.
-        widget = page.locator(".widget-container", has=page.locator(".widget-title", has_text="Data")).first
-        widget.hover()
-        widget.locator(".controls .expand.button").click()
-        page.get_by_text("Download Data", exact=True).click()
-
-        # The export is generated async server-side (first response is
-        # commonly a 503 while it's building). Capture the export URL from
-        # the first matching request, then poll it ourselves rather than
-        # relying on the page's own retry behavior.
+        # Capture the export URL from the first matching request, then poll
+        # it ourselves rather than relying on the page's own retry behavior.
+        # Registered before any interaction so we can't race the request.
         export_url = {"value": None}
 
         def on_response(resp):
@@ -113,11 +86,61 @@ def scrape_day_csv(target_date: str) -> str:
 
         page.on("response", on_response)
 
-        deadline = time.time() + 20
-        while export_url["value"] is None and time.time() < deadline:
-            page.wait_for_timeout(250)
-        if export_url["value"] is None:
-            raise RuntimeError("Did not observe a download_csv request after clicking Download Data")
+        try:
+            page.goto(PERISCOPE_URL, wait_until="networkidle", timeout=60_000)
+
+            # Make sure the dashboard has actually rendered its widgets (not
+            # just "network idle") before touching anything.
+            page.wait_for_selector(".filters-bar-label", timeout=30_000)
+            page.wait_for_selector(".ninja-grid", timeout=30_000)
+
+            # Open the report-level filters panel.
+            page.locator(".filters-bar-label").first.click()
+            page.wait_for_selector(".custom-date-option", timeout=10_000)
+            page.wait_for_timeout(300)
+
+            # Date Range column: select "Custom Range" to reveal Start/End Date.
+            page.locator(".custom-date-option").first.click()
+            page.wait_for_selector("input[placeholder='Start Date']", timeout=10_000)
+            page.wait_for_timeout(300)
+
+            start_input = page.get_by_placeholder("Start Date")
+            end_input = page.get_by_placeholder("End Date")
+            start_input.click()
+            start_input.fill(target_date)
+            end_input.click()
+            end_input.fill(target_date)
+
+            # Apply the filter and let the widget refresh.
+            apply_button = page.locator(".apply-button")
+            apply_button.click(force=True)
+            page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(2000)
+
+            # Find the "Data" widget specifically (report may gain more
+            # widgets later) and open its per-widget menu.
+            widget = page.locator(".widget-container", has=page.locator(".widget-title", has_text="Data")).first
+            widget.scroll_into_view_if_needed()
+            widget.hover()
+            page.wait_for_timeout(500)
+            widget.locator(".controls .expand.button").click(force=True)
+            page.wait_for_selector("text=Download Data", timeout=10_000)
+            page.get_by_text("Download Data", exact=True).click()
+
+            deadline = time.time() + 20
+            while export_url["value"] is None and time.time() < deadline:
+                page.wait_for_timeout(250)
+            if export_url["value"] is None:
+                raise RuntimeError("Did not observe a download_csv request after clicking Download Data")
+        except Exception:
+            try:
+                page.screenshot(path="debug_failure.png", full_page=True)
+                with open("debug_failure.html", "w", encoding="utf-8") as f:
+                    f.write(page.content())
+            except Exception as diag_err:
+                print(f"(could not capture debug artifacts: {diag_err})", file=sys.stderr)
+            browser.close()
+            raise
 
         csv_text = None
         deadline = time.time() + 90
