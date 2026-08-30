@@ -13,8 +13,9 @@
  *          That tab's header row already matches the HEADERS array below —
  *          confirmed live on 2026-08-30.
  *
- * doGet   -> tells the scraper the next date it should pull (D-1 buffer,
- *            computed on Asia/Taipei's calendar since the station is TPE).
+ * doGet   -> tells the scraper the next date it should pull (D0 buffer —
+ *            same-day pull allowed, computed on Asia/Taipei's calendar since
+ *            the station is TPE).
  * doPost  -> receives that date's rows (JSON) and appends them to the DATA tab.
  *
  * Both endpoints require ?token=<AUTH_TOKEN>, checked against the AUTH_TOKEN
@@ -25,8 +26,8 @@
 
 var SHEET_ID = '1gMxa0iisay-S6L3QvlfjFv0QwJTGt6xUptp6j9GegBU';
 var TAB_NAME = 'DATA';
-var TIMEZONE = 'Asia/Taipei';   // station TPE — "today" and the D-1 cutoff are computed on TPE's calendar day
-var PULL_BUFFER_DAYS = 1;       // D-1, per explicit instruction (confirmed 2026-08-30)
+var TIMEZONE = 'Asia/Taipei';   // station TPE — "today" and the pull cutoff are computed on TPE's calendar day
+var PULL_BUFFER_DAYS = 0;       // D0 (same-day pull allowed), changed from D-1 per explicit instruction on 2026-08-30
 
 var HEADERS = [
   'mission_sas_id', 'date', 'station', 'airline_code', 'tail_number', 'vessel_description',
