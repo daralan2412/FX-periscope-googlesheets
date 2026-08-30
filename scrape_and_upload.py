@@ -10,7 +10,7 @@ Target: Google Sheet "2026_RAW_MISSIONS", tab "DATA"
 
 Flow:
   1. GET  {SHEETS_WEBAPP_URL}?token=...  -> {"success": true, "next_date": "YYYY-MM-DD" | null}
-  2. If next_date is null, the D-1 buffer isn't satisfied yet -> exit 0, no-op.
+  2. If next_date is null, the pull buffer isn't satisfied yet -> exit 0, no-op.
   3. Open REP-1901, set the Date Range filter to a single day (next_date to
      next_date) via the "Custom Range" option, then use the widget's own
      "Download Data" CSV export (NOT DOM scraping - the Data table is a
@@ -207,7 +207,7 @@ def post_rows(target_date: str, rows: list):
 def main():
     next_date = get_next_date()
     if not next_date:
-        print("Nothing due yet (D-1 buffer not satisfied, Asia/Taipei calendar). Exiting.")
+        print("Nothing due yet (pull buffer not satisfied, Asia/Taipei calendar). Exiting.")
         return
 
     print(f"Pulling Periscope REP-1901 data for {next_date} (Asia/Taipei)...")
