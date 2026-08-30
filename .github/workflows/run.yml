@@ -2,7 +2,12 @@ name: Pull Periscope Ramp Ops (REP-1901) to Google Sheet
 
 on:
   schedule:
+    # Twice a day, Asia/Taipei time (UTC+8, no DST - so this offset is
+    # constant year-round, no seasonal cron drift):
+    #   23:00 UTC = 07:00 Asia/Taipei the following calendar day
     - cron: '0 23 * * *'
+    #   11:00 UTC = 19:00 (7:00 PM) Asia/Taipei the same calendar day
+    - cron: '0 11 * * *'
   workflow_dispatch: {}
 
 jobs:
