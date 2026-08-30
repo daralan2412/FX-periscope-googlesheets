@@ -104,12 +104,16 @@ def scrape_day_csv(target_date: str) -> str:
             page.wait_for_selector("input[placeholder='Start Date']", timeout=10_000)
             page.wait_for_timeout(300)
 
+            # A radio-button element in the same panel intermittently overlaps
+            # these inputs (visually settled, but still "receives pointer
+            # events" per Playwright's actionability check), so a plain
+            # .click() can retry for the full 30s timeout and fail. force=True
+            # skips that receives-events check and fills directly - safe here
+            # since we already waited for the input to exist and be enabled.
             start_input = page.get_by_placeholder("Start Date")
             end_input = page.get_by_placeholder("End Date")
-            start_input.click()
-            start_input.fill(target_date)
-            end_input.click()
-            end_input.fill(target_date)
+            start_input.fill(target_date, force=True)
+            end_input.fill(target_date, force=True)
 
             # Apply the filter and let the widget refresh.
             apply_button = page.locator(".apply-button")
