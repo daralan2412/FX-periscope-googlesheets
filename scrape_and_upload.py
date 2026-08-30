@@ -62,7 +62,7 @@ def get_next_date():
     return data.get("next_date")
 
 
-def scrape_day_csv(target_date: str) -> str:
+def scrape_day_csv(target_date: str):
     """Filter REP-1901's Data widget to a single day and pull its CSV export.
 
     Uses the widget's built-in "Download Data" export instead of scraping the
@@ -70,6 +70,14 @@ def scrape_day_csv(target_date: str) -> str:
     rendered near the viewport), so a DOM scrape would silently miss most of
     a real day's rows/columns. The CSV export is generated server-side and
     is complete regardless of what happened to be scrolled into view.
+
+    Returns the CSV text, or None if the widget shows "Query returned no
+    matching rows" for target_date (this happens for "today" under a D0
+    pull buffer, early in the day before any ops have been logged yet -
+    Sisense doesn't even offer a "Download Data" menu item when there's
+    nothing to export, so this has to be checked for explicitly rather than
+    treated as a scrape failure). Caller decides what a None means (skip
+    posting, don't advance lastProcessedDate, retry next run).
     """
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -122,9 +130,20 @@ def scrape_day_csv(target_date: str) -> str:
             page.wait_for_timeout(2000)
 
             # Find the "Data" widget specifically (report may gain more
-            # widgets later) and open its per-widget menu.
+            # widgets later).
             widget = page.locator(".widget-container", has=page.locator(".widget-title", has_text="Data")).first
             widget.scroll_into_view_if_needed()
+
+            # No rows for this date yet (common for "today" under D0, before
+            # ops have logged anything) - Sisense shows this in place of the
+            # grid and doesn't offer a "Download Data" menu item at all, so
+            # check for it up front instead of timing out waiting for a menu
+            # that will never appear.
+            if widget.locator(".error-message", has_text="no matching rows").count() > 0:
+                browser.close()
+                return None
+
+            # Open the per-widget menu.
             widget.hover()
             page.wait_for_timeout(500)
             widget.locator(".controls .expand.button").click(force=True)
@@ -212,6 +231,14 @@ def main():
 
     print(f"Pulling Periscope REP-1901 data for {next_date} (Asia/Taipei)...")
     csv_text = scrape_day_csv(next_date)
+    if csv_text is None:
+        # No rows logged for this date yet (e.g. "today" under D0, early in
+        # the day). Don't post, don't advance lastProcessedDate - exit 0 so
+        # this isn't treated as a failure, and the same date is retried next
+        # run once real data exists.
+        print(f"No rows yet for {next_date} - nothing to pull. Will retry next run.")
+        return
+
     rows = parse_csv_rows(csv_text)
     print(f"Scraped {len(rows)} rows for {next_date}.")
 
