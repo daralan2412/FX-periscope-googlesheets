@@ -13,21 +13,41 @@
  *          That tab's header row already matches the HEADERS array below —
  *          confirmed live on 2026-08-30.
  *
- * doGet   -> tells the scraper the next date it should pull (D0 buffer —
- *            same-day pull allowed, computed on Asia/Taipei's calendar since
- *            the station is TPE).
- * doPost  -> receives that date's rows (JSON) and appends them to the DATA tab.
+ * Rebuilt 2026-08-30 (v3): switched from a date-watermark pull (D-1, then
+ * D0 - see version history below) to the scraper pulling Periscope's
+ * "Current Week" filter every run, twice a day (7am/7pm Asia/Taipei - see
+ * .github/workflows/run.yml). Current Week necessarily overlaps what's
+ * already in the sheet on every run (and a mission's own fields - times,
+ * task columns - can fill in after it was first logged), so there is no
+ * lastProcessedDate watermark anymore. doPost now appends every posted row
+ * and then dedupes the whole DATA tab by mission_sas_id (column A), keeping
+ * the LAST (most recently posted = freshest) row per mission and deleting
+ * earlier duplicates - see dedupeByMissionId_().
+ *
+ * doGet   -> lightweight token/connectivity health check only. It no longer
+ *            decides what the scraper should pull (there's nothing to
+ *            decide - every run just re-syncs the current week).
+ * doPost  -> appends the posted rows to DATA, then dedupes by mission_sas_id.
  *
  * Both endpoints require ?token=<AUTH_TOKEN>, checked against the AUTH_TOKEN
  * Script Property (Project Settings > Script Properties) — set your own
  * random value there, then put the same value in the GitHub secret
  * WEBAPP_TOKEN. Nothing here reuses the old pipeline's token.
+ *
+ * Version history:
+ *   v1 (2026-08-30 early) - D-1 pull buffer, one date per run, tracked via
+ *       a lastProcessedDate Script Property.
+ *   v2 (2026-08-30 later) - switched the buffer to D0 (same-day pulls
+ *       allowed), still one date per run via lastProcessedDate.
+ *   v3 (2026-08-30, this version) - replaced the whole watermark/buffer
+ *       model with "Current Week" + dedup by mission_sas_id, per explicit
+ *       instruction. lastProcessedDate is no longer read or written; any
+ *       leftover Script Property by that name is simply unused now.
  */
 
 var SHEET_ID = '1gMxa0iisay-S6L3QvlfjFv0QwJTGt6xUptp6j9GegBU';
 var TAB_NAME = 'DATA';
-var TIMEZONE = 'Asia/Taipei';   // station TPE — "today" and the pull cutoff are computed on TPE's calendar day
-var PULL_BUFFER_DAYS = 0;       // D0 (same-day pull allowed), changed from D-1 per explicit instruction on 2026-08-30
+var MISSION_ID_COL = 1; // column A = mission_sas_id (1-based)
 
 var HEADERS = [
   'mission_sas_id', 'date', 'station', 'airline_code', 'tail_number', 'vessel_description',
@@ -40,26 +60,7 @@ var HEADERS = [
 
 function doGet(e) {
   if (!checkToken_(e)) return jsonOut_({ success: false, error: 'unauthorized' });
-
-  var props = PropertiesService.getScriptProperties();
-  var last = props.getProperty('lastProcessedDate'); // 'YYYY-MM-DD' — seed this manually before first run
-
-  if (!last) {
-    return jsonOut_({
-      success: false,
-      error: 'lastProcessedDate not set. Set it as a Script Property (the day BEFORE ' +
-        'you want the first pull to happen) before the first scheduled/manual run.'
-    });
-  }
-
-  var todayTpe = Utilities.formatDate(new Date(), TIMEZONE, 'yyyy-MM-dd');
-  var nextDate = addDays_(last, 1);
-  var cutoff = addDays_(todayTpe, -PULL_BUFFER_DAYS);
-
-  if (nextDate <= cutoff) {
-    return jsonOut_({ success: true, next_date: nextDate });
-  }
-  return jsonOut_({ success: true, next_date: null });
+  return jsonOut_({ success: true, message: 'ok' });
 }
 
 function doPost(e) {
@@ -72,15 +73,11 @@ function doPost(e) {
     return jsonOut_({ success: false, error: 'invalid JSON body: ' + err });
   }
 
-  var date = body.date;        // 'YYYY-MM-DD'
-  var rows = body.rows || [];  // array of arrays, each row matching HEADERS order/length
-
-  if (!date) return jsonOut_({ success: false, error: 'missing "date"' });
+  var rows = body.rows || []; // array of arrays, each row matching HEADERS order/length
 
   // Everything below can throw (bad sheet state, a malformed row, a Sheets
   // API hiccup) — always return JSON, even on failure, so the caller never
-  // has to parse an HTML error page. A failure here does NOT advance
-  // lastProcessedDate, so the same date is safely retried next run.
+  // has to parse an HTML error page.
   try {
     var ss = SpreadsheetApp.openById(SHEET_ID);
     var sheet = ss.getSheetByName(TAB_NAME);
@@ -107,24 +104,57 @@ function doPost(e) {
       sheet.getRange(sheet.getLastRow() + 1, 1, fixedRows.length, HEADERS.length).setValues(fixedRows);
     }
 
-    PropertiesService.getScriptProperties().setProperty('lastProcessedDate', date);
+    var duplicatesRemoved = dedupeByMissionId_(sheet);
 
-    return jsonOut_({ success: true, date: date, rows_written: rows.length });
+    return jsonOut_({
+      success: true,
+      rows_received: rows.length,
+      duplicates_removed: duplicatesRemoved,
+      total_rows: sheet.getLastRow() - 1
+    });
   } catch (err) {
-    return jsonOut_({ success: false, error: 'doPost failed: ' + err, date: date });
+    return jsonOut_({ success: false, error: 'doPost failed: ' + err });
   }
+}
+
+// Keeps the LAST occurrence of each non-blank mission_sas_id (column A) in
+// the DATA tab and deletes earlier duplicate rows. Rows appended later in
+// the same batch (or by a later run) reflect the freshest scrape of that
+// mission - Periscope can fill in a mission's own fields (times, task
+// columns) after it was first logged - so "last wins". Blank IDs are left
+// alone (never treated as duplicates of each other). Returns the number of
+// rows deleted.
+function dedupeByMissionId_(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 3) return 0; // header + at most 1 data row - nothing to dedupe
+
+  var ids = sheet.getRange(2, MISSION_ID_COL, lastRow - 1, 1).getValues();
+  var lastIndexById = {};
+  for (var i = 0; i < ids.length; i++) {
+    var id = String(ids[i][0]).trim();
+    if (!id) continue;
+    lastIndexById[id] = i; // later occurrences overwrite earlier ones in this map
+  }
+
+  var rowsToDelete = [];
+  for (var j = 0; j < ids.length; j++) {
+    var idJ = String(ids[j][0]).trim();
+    if (!idJ) continue;
+    if (lastIndexById[idJ] !== j) {
+      rowsToDelete.push(j + 2); // +2: back to 1-based sheet row number (data starts at row 2)
+    }
+  }
+
+  // Delete from the bottom up so earlier row numbers stay valid as we go.
+  rowsToDelete.sort(function (a, b) { return b - a; });
+  rowsToDelete.forEach(function (rowNum) { sheet.deleteRow(rowNum); });
+
+  return rowsToDelete.length;
 }
 
 function checkToken_(e) {
   var token = PropertiesService.getScriptProperties().getProperty('AUTH_TOKEN');
   return !!token && e.parameter && e.parameter.token === token;
-}
-
-function addDays_(yyyyMmDd, n) {
-  var parts = yyyyMmDd.split('-').map(Number);
-  var d = new Date(parts[0], parts[1] - 1, parts[2]);
-  d.setDate(d.getDate() + n);
-  return Utilities.formatDate(d, TIMEZONE, 'yyyy-MM-dd');
 }
 
 function jsonOut_(obj) {
