@@ -158,12 +158,17 @@ def scrape_last_7_days_csv():
             page.wait_for_selector(".radio-button-group", timeout=10_000)
             page.wait_for_timeout(300)
 
-            # Date Range column: select "Custom Range" (has_text does a
-            # substring match; no other option's label contains this text).
-            # force=True because a plain click here can hit a transient
-            # overlap issue - a sibling radio-button element intermittently
-            # intercepts pointer events while the panel settles.
-            custom_range_option = page.locator(".radio-button-group .small-radio-button", has_text="Custom Range").first
+            # Date Range column: select "Custom Range". Unlike the preset
+            # options (Current Week, 7 Days, etc.), which live inside
+            # .radio-button-group > .small-radio-button, "Custom Range" is
+            # rendered in its own sibling container - .custom-date-option -
+            # under .options (confirmed live via DOM inspection: a selector
+            # scoped to .radio-button-group never matches it, which is why
+            # an earlier version of this selector timed out in CI). It's
+            # always the first item in the Date Range column, so no scroll
+            # is needed to reach it. force=True because a plain click here
+            # can hit a transient overlap issue while the panel settles.
+            custom_range_option = page.locator(".custom-date-option .small-radio-button").first
             custom_range_option.click(force=True)
             page.wait_for_timeout(300)
 
