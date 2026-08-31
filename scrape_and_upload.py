@@ -175,32 +175,31 @@ def scrape_last_7_days_csv():
             # Fill Start/End Date with the freshly computed D-7/D0 window.
             # force=True for the same transient-overlap reason as above.
             #
-            # Each input needs "change" + "blur" + "focusout" dispatched
-            # after .fill(): this is a jQuery UI-style datepicker (class
-            # "hasDatepicker") that only parses/commits the typed text into
-            # its real filter state in response to those events - .fill()'s
-            # own "input" event alone leaves the field SHOWING the right
-            # text but not actually applied (confirmed live: Apply then
-            # silently produced "Query returned no matching rows" for a
-            # range that has data). A plain Locator.blur() call - a real,
-            # non-bubbling native blur - isn't enough either; it took all
-            # three bubbling events together to get the datepicker to
-            # reformat the field (its own tell that the value was actually
-            # parsed, e.g. "08/25/2026" -> "2026-08-25") and make Apply use
-            # it. dispatch_event() bubbles by default, matching what was
-            # verified working live.
+            # This is a jQuery UI-style datepicker (class "hasDatepicker")
+            # that only registers a value in its own real filter state in
+            # response to real keystrokes - a bulk .fill() (optionally
+            # followed by dispatching synthetic "change"/"blur"/"focusout"
+            # events) leaves the field SHOWING the right text but the
+            # underlying filter state stays unset, so Apply stays disabled
+            # and/or silently applies nothing (confirmed both ways in CI:
+            # a bare .fill() and a .fill() + dispatch_event() combo both
+            # left the Apply button with class "...apply-button disabled").
+            # press_sequentially() sends one real keydown/keypress/keyup
+            # per character, which is what a datepicker actually listens
+            # for, and is what worked reliably in manual verification.
             start_input = page.locator(".range-start")
             end_input = page.locator(".range-end")
 
             def fill_custom_range():
+                # .clear() before typing: on a retry the field may already
+                # hold a stale value from the previous attempt, and
+                # press_sequentially() appends rather than replaces.
                 start_input.click(force=True)
-                start_input.fill(start_str)
-                for evt in ("change", "blur", "focusout"):
-                    start_input.dispatch_event(evt)
+                start_input.clear()
+                start_input.press_sequentially(start_str, delay=40)
                 end_input.click(force=True)
-                end_input.fill(end_str)
-                for evt in ("change", "blur", "focusout"):
-                    end_input.dispatch_event(evt)
+                end_input.clear()
+                end_input.press_sequentially(end_str, delay=40)
                 page.wait_for_timeout(300)
 
             fill_custom_range()
