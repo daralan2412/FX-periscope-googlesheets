@@ -193,9 +193,22 @@ def scrape_last_7_days_csv():
             start_input.click(force=True)
             start_input.clear()
             start_input.press_sequentially(start_str, delay=40)
+            # Escape closes any jQuery UI datepicker calendar popup left
+            # open over the Start field - confirmed live that the popup
+            # can still be sitting there and, even though force=True
+            # bypasses Playwright's own actionability/interception check,
+            # an open popup can still eat the *app's* focus/blur-driven
+            # commit logic for the value that was just typed.
+            page.keyboard.press("Escape")
+
             end_input.click(force=True)
             end_input.clear()
             end_input.press_sequentially(end_str, delay=40)
+            page.keyboard.press("Escape")
+            # Real Tab off the End field so its blur-commit handler fires
+            # deterministically, instead of relying on the next
+            # interaction (clicking Apply) to imply a blur.
+            page.keyboard.press("Tab")
 
             # Don't click Apply on a fixed delay - wait for the actual
             # signal that the datepicker has validated both typed dates:
@@ -205,7 +218,9 @@ def scrape_last_7_days_csv():
             # for a bit while the widget's own validation catches up, and
             # clicking (even with force=True) while it's disabled is a
             # no-op in the app's own click handler, silently applying
-            # nothing.
+            # nothing. NOTE: this only proves the *button* thinks the
+            # inputs are non-empty/well-formed - see below, it is NOT
+            # sufficient proof the Custom Range actually got applied.
             page.wait_for_function(
                 """() => {
                     const btn = document.querySelector('.apply-button');
@@ -214,19 +229,31 @@ def scrape_last_7_days_csv():
                 timeout=15_000,
             )
 
-            # Apply the filter and let the widget refresh, then verify the
-            # dates actually committed - the breadcrumb only shows "<date>
-            # to <date>" once the range is genuinely applied. This is a
-            # hard failure (not a "no rows" case) if it doesn't happen.
+            # Apply the filter, then POLL the breadcrumb (not a fixed
+            # delay) until it shows the committed "<date> to <date>" text.
+            # Confirmed in CI (run #17, 2026-08-31): the Apply button
+            # losing its "disabled" class is NOT proof the range actually
+            # committed - a click right after that can still land before
+            # the widget's own async apply/refresh finishes, so a fixed
+            # "networkidle + 2s" wait after the click isn't reliable
+            # either. Poll for up to 15s; this is a hard failure (not a
+            # "no rows" case) if the breadcrumb never updates.
             apply_button = page.locator(".apply-button")
             breadcrumb = page.locator(".filters-bar-label").first
             apply_button.click(force=True)
-            page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(2000)
-            if " to " not in (breadcrumb.text_content() or ""):
+            try:
+                page.wait_for_function(
+                    """() => {
+                        const el = document.querySelector('.filters-bar-label');
+                        return !!el && el.textContent.includes(' to ');
+                    }""",
+                    timeout=15_000,
+                )
+            except Exception:
                 raise RuntimeError(
                     "Custom Range Start/End Date did not commit - breadcrumb never showed "
-                    "'<date> to <date>' after Apply"
+                    "'<date> to <date>' after Apply (last breadcrumb text: "
+                    f"{breadcrumb.text_content()!r})"
                 )
 
             # Find the "Data" widget specifically (report may gain more
