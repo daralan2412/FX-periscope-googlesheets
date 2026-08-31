@@ -170,7 +170,7 @@ def scrape_last_7_days_csv():
             # can hit a transient overlap issue while the panel settles.
             custom_range_option = page.locator(".custom-date-option .small-radio-button").first
             custom_range_option.click(force=True)
-            page.wait_for_timeout(300)
+            page.wait_for_timeout(800)
 
             # Fill Start/End Date with the freshly computed D-7/D0 window.
             # force=True for the same transient-overlap reason as above.
@@ -191,21 +191,51 @@ def scrape_last_7_days_csv():
             # verified working live.
             start_input = page.locator(".range-start")
             end_input = page.locator(".range-end")
-            start_input.click(force=True)
-            start_input.fill(start_str)
-            for evt in ("change", "blur", "focusout"):
-                start_input.dispatch_event(evt)
-            end_input.click(force=True)
-            end_input.fill(end_str)
-            for evt in ("change", "blur", "focusout"):
-                end_input.dispatch_event(evt)
-            page.wait_for_timeout(300)
 
-            # Apply the filter and let the widget refresh.
+            def fill_custom_range():
+                start_input.click(force=True)
+                start_input.fill(start_str)
+                for evt in ("change", "blur", "focusout"):
+                    start_input.dispatch_event(evt)
+                end_input.click(force=True)
+                end_input.fill(end_str)
+                for evt in ("change", "blur", "focusout"):
+                    end_input.dispatch_event(evt)
+                page.wait_for_timeout(300)
+
+            fill_custom_range()
+
+            # Apply the filter and let the widget refresh. Then verify the
+            # dates actually committed - the breadcrumb only shows "<date>
+            # to <date>" once the datepicker has parsed both fields; if the
+            # panel had opened but the datepicker's own JS wasn't fully
+            # initialized yet when fill_custom_range() ran (observed in CI:
+            # the same sequence that works interactively can lose this race
+            # when the page is still settling), Apply silently applies a
+            # half-set/unset range and the widget reports "no matching
+            # rows" instead of raising an error. Retry a couple of times
+            # before giving up, since this is a timing issue, not a real
+            # absence of data.
             apply_button = page.locator(".apply-button")
-            apply_button.click(force=True)
-            page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(2000)
+            breadcrumb = page.locator(".filters-bar-label").first
+            for attempt in range(3):
+                apply_button.click(force=True)
+                page.wait_for_load_state("networkidle")
+                page.wait_for_timeout(2000)
+                if " to " in (breadcrumb.text_content() or ""):
+                    break
+                print(
+                    f"Custom Range dates did not commit on attempt {attempt + 1}; retrying...",
+                    file=sys.stderr,
+                )
+                page.locator(".filters-bar-label").first.click()
+                page.wait_for_selector(".radio-button-group", timeout=10_000)
+                fill_custom_range()
+            else:
+                raise RuntimeError(
+                    "Custom Range Start/End Date never committed (breadcrumb never showed "
+                    "'<date> to <date>') after 3 attempts"
+                )
 
             # Find the "Data" widget specifically (report may gain more
             # widgets later).
