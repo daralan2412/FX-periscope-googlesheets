@@ -174,12 +174,31 @@ def scrape_last_7_days_csv():
 
             # Fill Start/End Date with the freshly computed D-7/D0 window.
             # force=True for the same transient-overlap reason as above.
+            #
+            # Each input needs "change" + "blur" + "focusout" dispatched
+            # after .fill(): this is a jQuery UI-style datepicker (class
+            # "hasDatepicker") that only parses/commits the typed text into
+            # its real filter state in response to those events - .fill()'s
+            # own "input" event alone leaves the field SHOWING the right
+            # text but not actually applied (confirmed live: Apply then
+            # silently produced "Query returned no matching rows" for a
+            # range that has data). A plain Locator.blur() call - a real,
+            # non-bubbling native blur - isn't enough either; it took all
+            # three bubbling events together to get the datepicker to
+            # reformat the field (its own tell that the value was actually
+            # parsed, e.g. "08/25/2026" -> "2026-08-25") and make Apply use
+            # it. dispatch_event() bubbles by default, matching what was
+            # verified working live.
             start_input = page.locator(".range-start")
             end_input = page.locator(".range-end")
             start_input.click(force=True)
             start_input.fill(start_str)
+            for evt in ("change", "blur", "focusout"):
+                start_input.dispatch_event(evt)
             end_input.click(force=True)
             end_input.fill(end_str)
+            for evt in ("change", "blur", "focusout"):
+                end_input.dispatch_event(evt)
             page.wait_for_timeout(300)
 
             # Apply the filter and let the widget refresh.
