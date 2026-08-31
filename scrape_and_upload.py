@@ -190,25 +190,26 @@ def scrape_last_7_days_csv():
             start_input = page.locator(".range-start")
             end_input = page.locator(".range-end")
 
+            # NOTE: no Escape/Tab here. Confirmed live (twice, 2026-08-31)
+            # that clicking straight into the End field reliably commits
+            # the Start field's typed value (it visibly reformats
+            # "08/25/2026" -> "2026-08-25" the moment End gets focus), and
+            # clicking Apply directly afterwards - without blurring End
+            # first - still commits correctly. An earlier version of this
+            # code pressed Escape after each field to close the
+            # datepicker's calendar popup; that turned out to be the wrong
+            # call - one live repro showed Escape leaving BOTH fields
+            # empty after Apply (breadcrumb read just "Custom Range", no
+            # dates, and the widget genuinely had no rows), most likely
+            # because Escape is also this datepicker's "clear/cancel the
+            # pending edit" shortcut, not just "close the popup".
             start_input.click(force=True)
             start_input.clear()
             start_input.press_sequentially(start_str, delay=40)
-            # Escape closes any jQuery UI datepicker calendar popup left
-            # open over the Start field - confirmed live that the popup
-            # can still be sitting there and, even though force=True
-            # bypasses Playwright's own actionability/interception check,
-            # an open popup can still eat the *app's* focus/blur-driven
-            # commit logic for the value that was just typed.
-            page.keyboard.press("Escape")
 
             end_input.click(force=True)
             end_input.clear()
             end_input.press_sequentially(end_str, delay=40)
-            page.keyboard.press("Escape")
-            # Real Tab off the End field so its blur-commit handler fires
-            # deterministically, instead of relying on the next
-            # interaction (clicking Apply) to imply a blur.
-            page.keyboard.press("Tab")
 
             # Don't click Apply on a fixed delay - wait for the actual
             # signal that the datepicker has validated both typed dates:
@@ -269,11 +270,44 @@ def scrape_last_7_days_csv():
             widget = page.locator(".widget-container", has=page.locator(".widget-title", has_text="Data")).first
             widget.scroll_into_view_if_needed()
 
+            # Wait for the query that Apply just triggered to finish. The
+            # widget shows a transient ".widget-loader" overlay ON TOP OF
+            # its *previous* results while requerying - checking the
+            # widget's contents before this resolves can observe stale
+            # state. Poll (not a fixed delay) for either real grid rows or
+            # a genuinely visible "no matching rows" message; also bail
+            # out if the loader itself never appears/disappears within
+            # the timeout, since a network hiccup here should be a clear
+            # failure, not a silent "no rows".
+            #
+            # IMPORTANT: the ".error-message" node is ALWAYS present in
+            # the widget's DOM, even when it's showing real data - it's a
+            # hidden placeholder (confirmed live: display:none,
+            # offsetParent:null while a fully-loaded grid with rows sat
+            # right next to it). A bare `.count() > 0` check on it is
+            # true unconditionally, which is why CI run #19 (2026-08-31)
+            # reported "no rows" for a range that actually had data. Must
+            # check visibility, not just presence.
+            widget_handle = widget.element_handle()
+            page.wait_for_function(
+                """(el) => {
+                    const loader = el.querySelector('.widget-loader');
+                    if (loader && loader.offsetParent !== null) return false;
+                    const err = el.querySelector('.error-message');
+                    const errVisible = !!err && err.offsetParent !== null;
+                    const grid = el.querySelector('.ninja-grid');
+                    return errVisible || !!grid;
+                }""",
+                arg=widget_handle,
+                timeout=30_000,
+            )
+
             # No rows in this date range - Sisense shows this in place of
-            # the grid and doesn't offer a "Download Data" menu item at all,
-            # so check for it up front instead of timing out waiting for a
-            # menu that will never appear.
-            if widget.locator(".error-message", has_text="no matching rows").count() > 0:
+            # the grid and doesn't offer a "Download Data" menu item at
+            # all, so check for it (now that the query above has settled)
+            # instead of timing out waiting for a menu that will never
+            # appear.
+            if widget.locator(".error-message", has_text="no matching rows").is_visible():
                 browser.close()
                 return None
 
