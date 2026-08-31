@@ -190,50 +190,43 @@ def scrape_last_7_days_csv():
             start_input = page.locator(".range-start")
             end_input = page.locator(".range-end")
 
-            def fill_custom_range():
-                # .clear() before typing: on a retry the field may already
-                # hold a stale value from the previous attempt, and
-                # press_sequentially() appends rather than replaces.
-                start_input.click(force=True)
-                start_input.clear()
-                start_input.press_sequentially(start_str, delay=40)
-                end_input.click(force=True)
-                end_input.clear()
-                end_input.press_sequentially(end_str, delay=40)
-                page.wait_for_timeout(300)
+            start_input.click(force=True)
+            start_input.clear()
+            start_input.press_sequentially(start_str, delay=40)
+            end_input.click(force=True)
+            end_input.clear()
+            end_input.press_sequentially(end_str, delay=40)
 
-            fill_custom_range()
+            # Don't click Apply on a fixed delay - wait for the actual
+            # signal that the datepicker has validated both typed dates:
+            # the Apply button loses its "disabled" class. Confirmed live
+            # in CI that even with real keystrokes, a short fixed wait
+            # isn't always enough - the button can still read "disabled"
+            # for a bit while the widget's own validation catches up, and
+            # clicking (even with force=True) while it's disabled is a
+            # no-op in the app's own click handler, silently applying
+            # nothing.
+            page.wait_for_function(
+                """() => {
+                    const btn = document.querySelector('.apply-button');
+                    return btn && !btn.classList.contains('disabled');
+                }""",
+                timeout=15_000,
+            )
 
-            # Apply the filter and let the widget refresh. Then verify the
+            # Apply the filter and let the widget refresh, then verify the
             # dates actually committed - the breadcrumb only shows "<date>
-            # to <date>" once the datepicker has parsed both fields; if the
-            # panel had opened but the datepicker's own JS wasn't fully
-            # initialized yet when fill_custom_range() ran (observed in CI:
-            # the same sequence that works interactively can lose this race
-            # when the page is still settling), Apply silently applies a
-            # half-set/unset range and the widget reports "no matching
-            # rows" instead of raising an error. Retry a couple of times
-            # before giving up, since this is a timing issue, not a real
-            # absence of data.
+            # to <date>" once the range is genuinely applied. This is a
+            # hard failure (not a "no rows" case) if it doesn't happen.
             apply_button = page.locator(".apply-button")
             breadcrumb = page.locator(".filters-bar-label").first
-            for attempt in range(3):
-                apply_button.click(force=True)
-                page.wait_for_load_state("networkidle")
-                page.wait_for_timeout(2000)
-                if " to " in (breadcrumb.text_content() or ""):
-                    break
-                print(
-                    f"Custom Range dates did not commit on attempt {attempt + 1}; retrying...",
-                    file=sys.stderr,
-                )
-                page.locator(".filters-bar-label").first.click()
-                page.wait_for_selector(".radio-button-group", timeout=10_000)
-                fill_custom_range()
-            else:
+            apply_button.click(force=True)
+            page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(2000)
+            if " to " not in (breadcrumb.text_content() or ""):
                 raise RuntimeError(
-                    "Custom Range Start/End Date never committed (breadcrumb never showed "
-                    "'<date> to <date>') after 3 attempts"
+                    "Custom Range Start/End Date did not commit - breadcrumb never showed "
+                    "'<date> to <date>' after Apply"
                 )
 
             # Find the "Data" widget specifically (report may gain more
