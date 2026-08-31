@@ -231,29 +231,37 @@ def scrape_last_7_days_csv():
 
             # Apply the filter, then POLL the breadcrumb (not a fixed
             # delay) until it shows the committed "<date> to <date>" text.
-            # Confirmed in CI (run #17, 2026-08-31): the Apply button
-            # losing its "disabled" class is NOT proof the range actually
-            # committed - a click right after that can still land before
-            # the widget's own async apply/refresh finishes, so a fixed
-            # "networkidle + 2s" wait after the click isn't reliable
-            # either. Poll for up to 15s; this is a hard failure (not a
-            # "no rows" case) if the breadcrumb never updates.
+            #
+            # IMPORTANT: ".filters-bar-label" (used above to *open* the
+            # panel) is NOT the per-filter breadcrumb - confirmed live via
+            # DOM inspection that it only ever contains the generic
+            # "Filters (N)" toggle text (a <div class="filters-bar-label
+            # bold">Filters<span id="filter-count">(N)</span>...</div>).
+            # This selector bug is why every prior CI run failed this
+            # check even when the date range genuinely committed (run
+            # #18, 2026-08-31: last breadcrumb text was literally
+            # 'Filters (1)'). The actual per-filter readout lives in
+            # ".filters-bar .filter-group .filter .label" (sibling of a
+            # ".dimension-name" span reading "DateRange") - confirmed live
+            # it shows "2026-08-25 to 2026-09-01" (computed dates,
+            # YYYY-MM-DD) once both inputs hold a valid date, and keeps
+            # showing it after Apply is clicked and the panel closes.
             apply_button = page.locator(".apply-button")
-            breadcrumb = page.locator(".filters-bar-label").first
+            date_range_label = page.locator(".filters-bar .filter-group .filter .label").first
             apply_button.click(force=True)
             try:
                 page.wait_for_function(
                     """() => {
-                        const el = document.querySelector('.filters-bar-label');
+                        const el = document.querySelector('.filters-bar .filter-group .filter .label');
                         return !!el && el.textContent.includes(' to ');
                     }""",
                     timeout=15_000,
                 )
             except Exception:
                 raise RuntimeError(
-                    "Custom Range Start/End Date did not commit - breadcrumb never showed "
-                    "'<date> to <date>' after Apply (last breadcrumb text: "
-                    f"{breadcrumb.text_content()!r})"
+                    "Custom Range Start/End Date did not commit - filter breadcrumb never "
+                    "showed '<date> to <date>' after Apply (last breadcrumb text: "
+                    f"{date_range_label.text_content()!r})"
                 )
 
             # Find the "Data" widget specifically (report may gain more
