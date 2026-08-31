@@ -16,27 +16,34 @@ that pipeline keeps feeding the old MISSIONS/WC_PAX tab exactly as before.
   order. A separate "SOURCE" tab in that sheet already notes the Periscope
   link — this pipeline is what actually keeps "DATA" filled in.
 
-## How it pulls data (v3, 2026-08-30)
+## How it pulls data (v4, 2026-08-31)
 
 Every run:
 
-1. Opens REP-1901 and sets the Date Range filter to **"Current Week"**
-   (Sisense's own Sun/Mon–today rolling window), not a single day.
+1. Opens REP-1901 and sets the Date Range filter to a rolling
+   **D0-to-D-7 window** — today back through 7 days ago, computed fresh
+   every run in Asia/Taipei time — via Periscope's **"Custom Range"** filter
+   with explicit Start/End dates, not a single day and not the "Current
+   Week" preset. (Current Week is a calendar-week bucket that resets to
+   empty every Sunday even though there's still recent data from the prior
+   week worth re-syncing — confirmed live on 2026-08-30 — so the filter was
+   switched to this explicit trailing window instead.)
 2. Uses the "Data" widget's own **"Download Data"** CSV export (not DOM
    scraping — the grid is virtualized, so a DOM scrape would silently miss
    rows/columns outside the current viewport).
 3. POSTs every row to the Apps Script Web App, which appends them to DATA
    and then **dedupes the whole tab by `mission_sas_id`** (column A),
    keeping the most-recently-posted row per mission and deleting older
-   duplicates. This matters because Current Week re-scrapes the same
-   missions on every run, and Periscope can fill in a mission's own fields
-   (times, task columns) after it was first logged — "last wins" keeps the
-   sheet holding the freshest version of each mission's row.
+   duplicates. This matters because the D0-to-D-7 window re-scrapes the
+   same missions on every run, and Periscope can fill in a mission's own
+   fields (times, task columns) after it was first logged — "last wins"
+   keeps the sheet holding the freshest version of each mission's row.
 
 There's no date watermark anymore (earlier versions tracked a
 `lastProcessedDate` Script Property for a D-1, then D0, single-day pull —
 see version history in `apps-script/Code.gs` if you're curious). Every run
-just re-syncs the current week and lets the dedup step keep things clean.
+just re-syncs the trailing 7-day window and lets the dedup step keep things
+clean.
 
 **Schedule**: twice a day, Asia/Taipei time — 7:00 AM and 7:00 PM
 (`.github/workflows/run.yml`; TPE has no DST, so the UTC offset is constant
@@ -79,18 +86,20 @@ year-round).
 
 ## Known edge case
 
-If Periscope shows "Query returned no matching rows" for the current week
-(e.g. very early Monday before anything's been logged), there's no
-"Download Data" menu to click at all. The scraper detects this up front and
-exits cleanly with "No rows yet... Will retry next run" rather than failing
-— nothing is posted, so there's nothing to dedupe either.
+If Periscope shows "Query returned no matching rows" for the D0-to-D-7
+window (extremely unlikely given it spans 8 calendar days, but possible if
+nothing at all has been logged in that stretch), there's no "Download Data"
+menu to click at all. The scraper detects this up front and exits cleanly
+with "No rows... Will retry next run" rather than failing — nothing is
+posted, so there's nothing to dedupe either.
 
 ## Files
 
 - `apps-script/Code.gs` — the Web App: `doGet` is now just a token/health
   check; `doPost` appends posted rows to DATA and dedupes the tab by
   `mission_sas_id`, keeping the freshest row per mission.
-- `scrape_and_upload.py` — scrapes REP-1901's Current Week CSV export via
-  Playwright, posts the rows to the Web App.
+- `scrape_and_upload.py` — scrapes REP-1901's rolling D0-to-D-7 CSV export
+  (Custom Range, dates computed fresh every run) via Playwright, posts the
+  rows to the Web App.
 - `.github/workflows/run.yml` — 7am + 7pm Asia/Taipei cron, plus manual trigger.
 - `requirements.txt` — `requests`, `playwright`.

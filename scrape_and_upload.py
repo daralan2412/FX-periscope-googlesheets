@@ -9,24 +9,39 @@ Target: Google Sheet "2026_RAW_MISSIONS", tab "DATA"
         via the Apps Script Web App (SHEETS_WEBAPP_URL / WEBAPP_TOKEN secrets).
 
 Flow:
-  1. Open REP-1901, set the Date Range filter to "Current Week" (not a single
-     day), then use the widget's own "Download Data" CSV export (NOT DOM
-     scraping - the Data table is a virtualized Sisense grid, so most
-     rows/columns are never in the DOM at once; the CSV export is generated
-     server-side and is complete).
+  1. Open REP-1901, set the Date Range filter to a rolling D0-to-D-7 window
+     (today back through 7 days ago, via Custom Range with computed
+     Start/End dates - not a single day), then use the widget's own
+     "Download Data" CSV export (NOT DOM scraping - the Data table is a
+     virtualized Sisense grid, so most rows/columns are never in the DOM at
+     once; the CSV export is generated server-side and is complete).
   2. POST {"rows": [[...35 cols...], ...]} to the Web App, which appends the
      rows to the DATA tab and then dedupes the whole tab by mission_sas_id
      (column A), keeping the most-recently-posted row per mission.
 
-Rebuilt 2026-08-30 (v3): switched from a single-day pull tracked by a
-lastProcessedDate watermark (first D-1, then D0) to always pulling
-Periscope's "Current Week" filter, run twice a day (7am/7pm Asia/Taipei).
-Current Week necessarily re-scrapes rows already in the sheet on every run
-(and a mission's own fields - times, task columns - can fill in after it
-was first logged), so there is no watermark anymore: every run re-syncs the
-whole current week, and the Apps Script side is responsible for collapsing
-duplicate mission_sas_id rows down to the freshest one. See Code.gs for the
-dedup logic.
+Rebuilt 2026-08-31 (v4): switched the Date Range filter from Periscope's
+"Current Week" preset (a calendar-week bucket that resets to empty every
+Sunday) to an explicit rolling trailing-7-day window - "D0 to D-7" - built
+from Periscope's "Custom Range" filter with Start/End Date computed fresh
+on every run (today in Asia/Taipei, and today minus 7 days). This avoids
+the Current Week edge case where the filter returns zero rows right after
+the calendar week rolls over (confirmed live on 2026-08-30, a Sunday) even
+though there is recent data from the prior week that should still be
+re-synced. Everything downstream is unchanged: the widget's CSV export is
+still used (not DOM scraping), rows are still POSTed as a full batch, and
+the Apps Script side still dedupes the DATA tab by mission_sas_id, keeping
+the freshest (most-recently-posted) row per mission - so re-pulling
+overlapping days on every run is still safe and expected.
+
+Rebuilt 2026-08-30 (v3, superseded by the above) switched from a
+single-day pull tracked by a lastProcessedDate watermark (first D-1, then
+D0) to always pulling Periscope's "Current Week" filter, run twice a day
+(7am/7pm Asia/Taipei). Current Week necessarily re-scrapes rows already in
+the sheet on every run (and a mission's own fields - times, task columns -
+can fill in after it was first logged), so there is no watermark anymore:
+every run re-syncs a window of recent days, and the Apps Script side is
+responsible for collapsing duplicate mission_sas_id rows down to the
+freshest one. See Code.gs for the dedup logic.
 
 Rebuilt 2026-08-30 (v2, superseded by the above) after the first live run
 failed: the original version DOM-scraped a "table tbody tr" selector that
@@ -45,11 +60,15 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 from playwright.sync_api import sync_playwright
 
 PERISCOPE_URL = "https://app.periscopedata.com/shared/b9a2f550-7597-46fe-952a-baa20efe4d35"
+TAIPEI_TZ = ZoneInfo("Asia/Taipei")
+LOOKBACK_DAYS = 7  # "D0 to D-7": today back through 7 days ago, inclusive.
 WEBAPP_URL = os.environ["SHEETS_WEBAPP_URL"]
 WEBAPP_TOKEN = os.environ["WEBAPP_TOKEN"]
 
@@ -76,8 +95,28 @@ def check_token():
         raise RuntimeError(f"Web App auth check failed: {data}")
 
 
-def scrape_current_week_csv():
-    """Filter REP-1901's Data widget to "Current Week" and pull its CSV export.
+def compute_date_range_mmddyyyy():
+    """D0 to D-7: today (Asia/Taipei) and today minus LOOKBACK_DAYS, both
+    formatted MM/DD/YYYY for Periscope's Custom Range Start/End Date inputs.
+    Computed fresh on every call so the window is always "as of right now",
+    not pinned to whatever day the code was last edited.
+    """
+    today = datetime.now(TAIPEI_TZ).date()
+    start = today - timedelta(days=LOOKBACK_DAYS)
+    return start.strftime("%m/%d/%Y"), today.strftime("%m/%d/%Y")
+
+
+def scrape_last_7_days_csv():
+    """Filter REP-1901's Data widget to a rolling D0-to-D-7 window and pull
+    its CSV export.
+
+    Uses Periscope's "Custom Range" Date Range filter with Start/End Date
+    computed fresh on every run (see compute_date_range_mmddyyyy), rather
+    than a built-in preset - this pins down the exact semantics ("today back
+    through 7 days ago, inclusive") instead of relying on unclear/undocumented
+    behavior of a preset like "7 Days". Verified live: filling Start/End Date
+    with explicit MM/DD/YYYY values and clicking Apply correctly narrows the
+    Data widget and the resulting breadcrumb to that exact range.
 
     Uses the widget's built-in "Download Data" export instead of scraping the
     DOM: the Data widget is a virtualized grid (rows AND columns are only
@@ -86,11 +125,11 @@ def scrape_current_week_csv():
     is complete regardless of what happened to be scrolled into view.
 
     Returns the CSV text, or None if the widget shows "Query returned no
-    matching rows" (e.g. very early Monday morning before anything has been
-    logged yet this week) - Sisense doesn't even offer a "Download Data"
-    menu item when there's nothing to export, so this has to be checked for
-    explicitly rather than treated as a scrape failure.
+    matching rows" - Sisense doesn't even offer a "Download Data" menu item
+    when there's nothing to export, so this has to be checked for explicitly
+    rather than treated as a scrape failure.
     """
+    start_str, end_str = compute_date_range_mmddyyyy()
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1600, "height": 1000})
@@ -119,16 +158,23 @@ def scrape_current_week_csv():
             page.wait_for_selector(".radio-button-group", timeout=10_000)
             page.wait_for_timeout(300)
 
-            # Date Range column: select "Current Week" (label text is
-            # actually "Current Week (DEFAULT)" - has_text does a substring
-            # match, and no other option's label contains "Current Week").
-            # force=True because a plain click here can hit the same
-            # transient-overlap issue seen on the Start/End Date inputs when
-            # this panel was used for Custom Range (a sibling radio-button
-            # element intermittently intercepts pointer events while the
-            # panel settles).
-            current_week_option = page.locator(".radio-button-group .small-radio-button", has_text="Current Week").first
-            current_week_option.click(force=True)
+            # Date Range column: select "Custom Range" (has_text does a
+            # substring match; no other option's label contains this text).
+            # force=True because a plain click here can hit a transient
+            # overlap issue - a sibling radio-button element intermittently
+            # intercepts pointer events while the panel settles.
+            custom_range_option = page.locator(".radio-button-group .small-radio-button", has_text="Custom Range").first
+            custom_range_option.click(force=True)
+            page.wait_for_timeout(300)
+
+            # Fill Start/End Date with the freshly computed D-7/D0 window.
+            # force=True for the same transient-overlap reason as above.
+            start_input = page.locator(".range-start")
+            end_input = page.locator(".range-end")
+            start_input.click(force=True)
+            start_input.fill(start_str)
+            end_input.click(force=True)
+            end_input.fill(end_str)
             page.wait_for_timeout(300)
 
             # Apply the filter and let the widget refresh.
@@ -142,10 +188,10 @@ def scrape_current_week_csv():
             widget = page.locator(".widget-container", has=page.locator(".widget-title", has_text="Data")).first
             widget.scroll_into_view_if_needed()
 
-            # No rows for the current week yet - Sisense shows this in place
-            # of the grid and doesn't offer a "Download Data" menu item at
-            # all, so check for it up front instead of timing out waiting
-            # for a menu that will never appear.
+            # No rows in this date range - Sisense shows this in place of
+            # the grid and doesn't offer a "Download Data" menu item at all,
+            # so check for it up front instead of timing out waiting for a
+            # menu that will never appear.
             if widget.locator(".error-message", has_text="no matching rows").count() > 0:
                 browser.close()
                 return None
@@ -233,14 +279,15 @@ def post_rows(rows: list):
 def main():
     check_token()
 
-    print("Pulling Periscope REP-1901 current-week data (Asia/Taipei)...")
-    csv_text = scrape_current_week_csv()
+    start_str, end_str = compute_date_range_mmddyyyy()
+    print(f"Pulling Periscope REP-1901 data for {start_str} to {end_str} (D-7 to D0, Asia/Taipei)...")
+    csv_text = scrape_last_7_days_csv()
     if csv_text is None:
-        print("No rows yet for the current week - nothing to pull. Will retry next run.")
+        print(f"No rows for {start_str} to {end_str} - nothing to pull. Will retry next run.")
         return
 
     rows = parse_csv_rows(csv_text)
-    print(f"Scraped {len(rows)} rows for the current week.")
+    print(f"Scraped {len(rows)} rows for {start_str} to {end_str}.")
 
     result = post_rows(rows)
     print(
