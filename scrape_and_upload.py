@@ -19,6 +19,14 @@ Flow:
      rows to the DATA tab and then dedupes the whole tab by mission_sas_id
      (column A), keeping the most-recently-posted row per mission.
 
+Hardened 2026-09-02 (v4.1) after the two scheduled 7am/7pm runs on the v4
+code both failed while every manual run passed: at those hours Sisense is
+slow enough that the page's default "All Dates" query didn't render the
+grid within the old 30s up-front wait. Fixes: don't wait for the grid (or
+"networkidle") before applying our own filter at all, much longer timeouts
+on the waits that actually matter (post-Apply widget settle, CSV export),
+and a whole-scrape retry with a fresh browser (SCRAPE_ATTEMPTS).
+
 Rebuilt 2026-08-31 (v4): switched the Date Range filter from Periscope's
 "Current Week" preset (a calendar-week bucket that resets to empty every
 Sunday) to an explicit rolling trailing-7-day window - "D0 to D-7" - built
@@ -69,6 +77,8 @@ from playwright.sync_api import sync_playwright
 PERISCOPE_URL = "https://app.periscopedata.com/shared/b9a2f550-7597-46fe-952a-baa20efe4d35"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 LOOKBACK_DAYS = 7  # "D0 to D-7": today back through 7 days ago, inclusive.
+SCRAPE_ATTEMPTS = 3  # whole-scrape retries with a fresh browser (see main()).
+SCRAPE_RETRY_DELAY_S = 60
 WEBAPP_URL = os.environ["SHEETS_WEBAPP_URL"]
 WEBAPP_TOKEN = os.environ["WEBAPP_TOKEN"]
 
@@ -146,16 +156,31 @@ def scrape_last_7_days_csv():
         page.on("response", on_response)
 
         try:
-            page.goto(PERISCOPE_URL, wait_until="networkidle", timeout=60_000)
+            # "domcontentloaded" rather than "networkidle": the report's
+            # default Date Range is "All Dates", so the page kicks off a
+            # full-history query the moment it loads. On the scheduled
+            # 7am/7pm runs that query is slow enough that "networkidle"
+            # (and the old up-front wait for the grid, see below) never
+            # settled in time. We don't need that unfiltered query at all
+            # - we're about to replace it with our own Custom Range - so
+            # don't wait on it.
+            page.goto(PERISCOPE_URL, wait_until="domcontentloaded", timeout=90_000)
 
-            # Make sure the dashboard has actually rendered its widgets (not
-            # just "network idle") before touching anything.
-            page.wait_for_selector(".filters-bar-label", timeout=30_000)
-            page.wait_for_selector(".ninja-grid", timeout=30_000)
+            # Only wait for the filters bar - that's all the next step
+            # needs. NOTE: deliberately NOT waiting for ".ninja-grid" here.
+            # An earlier version did, with a 30s timeout, and that is
+            # exactly what every scheduled run failed on (runs #22, #23 on
+            # 2026-09-01/02: "waiting for locator('.ninja-grid') to be
+            # visible - Timeout 30000ms exceeded") while manual runs at
+            # other times of day passed: the grid only renders once the
+            # default "All Dates" query finishes, which at those hours
+            # takes longer than 30s. The grid IS waited for further down,
+            # after our filter is applied, with a much longer timeout.
+            page.wait_for_selector(".filters-bar-label", timeout=90_000)
 
             # Open the report-level filters panel.
             page.locator(".filters-bar-label").first.click()
-            page.wait_for_selector(".radio-button-group", timeout=10_000)
+            page.wait_for_selector(".radio-button-group", timeout=30_000)
             page.wait_for_timeout(300)
 
             # Date Range column: select "Custom Range". Unlike the preset
@@ -299,7 +324,12 @@ def scrape_last_7_days_csv():
                     return errVisible || !!grid;
                 }""",
                 arg=widget_handle,
-                timeout=30_000,
+                # Generous: on the scheduled 7am/7pm runs Sisense has been
+                # measurably slower than during ad-hoc manual runs (see
+                # the ".ninja-grid" note near page.goto above), and this
+                # query may also be queued behind the still-in-flight
+                # default "All Dates" query the page fired on load.
+                timeout=180_000,
             )
 
             # No rows in this date range - Sisense shows this in place of
@@ -315,10 +345,10 @@ def scrape_last_7_days_csv():
             widget.hover()
             page.wait_for_timeout(500)
             widget.locator(".controls .expand.button").click(force=True)
-            page.wait_for_selector("text=Download Data", timeout=10_000)
+            page.wait_for_selector("text=Download Data", timeout=30_000)
             page.get_by_text("Download Data", exact=True).click()
 
-            deadline = time.time() + 20
+            deadline = time.time() + 60
             while export_url["value"] is None and time.time() < deadline:
                 page.wait_for_timeout(250)
             if export_url["value"] is None:
@@ -334,7 +364,7 @@ def scrape_last_7_days_csv():
             raise
 
         csv_text = None
-        deadline = time.time() + 90
+        deadline = time.time() + 180
         while time.time() < deadline:
             resp = page.context.request.get(export_url["value"])
             if resp.status == 200:
@@ -396,7 +426,29 @@ def main():
 
     start_str, end_str = compute_date_range_mmddyyyy()
     print(f"Pulling Periscope REP-1901 data for {start_str} to {end_str} (D-7 to D0, Asia/Taipei)...")
-    csv_text = scrape_last_7_days_csv()
+
+    # Whole-scrape retry with a fresh browser. Every failure seen on the
+    # scheduled runs so far has been Sisense being slow/unresponsive at
+    # that hour rather than anything wrong with the page or the code, and
+    # a second attempt a minute later is cheap compared to losing a whole
+    # 12-hour sync window. The debug screenshot/HTML from the LAST failed
+    # attempt is what ends up in the workflow's artifacts.
+    csv_text = None
+    last_exc = None
+    for attempt in range(1, SCRAPE_ATTEMPTS + 1):
+        try:
+            csv_text = scrape_last_7_days_csv()
+            last_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001 - deliberately broad, see above
+            last_exc = exc
+            print(f"Scrape attempt {attempt}/{SCRAPE_ATTEMPTS} failed: {exc}", file=sys.stderr)
+            if attempt < SCRAPE_ATTEMPTS:
+                print(f"Retrying in {SCRAPE_RETRY_DELAY_S}s with a fresh browser...", file=sys.stderr)
+                time.sleep(SCRAPE_RETRY_DELAY_S)
+    if last_exc is not None:
+        raise last_exc
+
     if csv_text is None:
         print(f"No rows for {start_str} to {end_str} - nothing to pull. Will retry next run.")
         return
