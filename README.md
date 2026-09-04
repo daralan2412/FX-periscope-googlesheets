@@ -45,7 +45,7 @@ see version history in `apps-script/Code.gs` if you're curious). Every run
 just re-syncs the trailing 7-day window and lets the dedup step keep things
 clean.
 
-**Schedule**: twice a day, Asia/Taipei time — 7:00 AM and 7:00 PM
+**Schedule**: twice a day, Asia/Taipei time — 9:00 AM and 9:00 PM
 (`.github/workflows/run.yml`; TPE has no DST, so the UTC offset is constant
 year-round).
 
@@ -81,7 +81,7 @@ year-round).
    - Actions tab > "Pull Periscope Ramp Ops (REP-1901) to Google Sheet" >
      Run workflow (manual `workflow_dispatch`), rather than waiting for the
      cron, so you can watch the log and check the sheet afterward.
-   - After it succeeds, the twice-daily cron (7am/7pm Asia/Taipei) takes
+   - After it succeeds, the twice-daily cron (9am/9pm Asia/Taipei) takes
      over automatically.
 
 ## Known edge case
@@ -101,5 +101,5 @@ posted, so there's nothing to dedupe either.
 - `scrape_and_upload.py` — scrapes REP-1901's rolling D0-to-D-7 CSV export
   (Custom Range, dates computed fresh every run) via Playwright, posts the
   rows to the Web App.
-- `.github/workflows/run.yml` — 7am + 7pm Asia/Taipei cron, plus manual trigger.
+- `.github/workflows/run.yml` — 9am + 9pm Asia/Taipei cron, plus manual trigger. (Note: GitHub fires cron jobs 2-4 h late on busy days, so expect the actual runs closer to 11am / 11pm.)
 - `requirements.txt` — `requests`, `playwright`.
