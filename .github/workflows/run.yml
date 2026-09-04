@@ -4,10 +4,13 @@ on:
   schedule:
     # Twice a day, Asia/Taipei time (UTC+8, no DST - so this offset is
     # constant year-round, no seasonal cron drift):
-    #   23:00 UTC = 07:00 Asia/Taipei the following calendar day
-    - cron: '0 23 * * *'
-    #   11:00 UTC = 19:00 (7:00 PM) Asia/Taipei the same calendar day
-    - cron: '0 11 * * *'
+    #   01:00 UTC = 09:00 Asia/Taipei the same calendar day
+    - cron: '0 1 * * *'
+    #   13:00 UTC = 21:00 (9:00 PM) Asia/Taipei the same calendar day
+    #   (moved from 07:00/19:00 on 2026-09-04: the evening run is the one
+    #   that captures D0, and TPE missions run ~17:00-21:00 local, so 21:00
+    #   catches most of the day's rows; the morning run re-syncs D-1.)
+    - cron: '0 13 * * *'
   workflow_dispatch: {}
 
 jobs:
