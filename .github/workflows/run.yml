@@ -46,6 +46,9 @@ jobs:
 
       - name: Run scrape and upload
         env:
+          # Stream prints to the log as they happen (otherwise Python buffers
+          # stdout on Actions and nothing shows until the step ends).
+          PYTHONUNBUFFERED: '1'
           SHEETS_WEBAPP_URL: ${{ secrets.SHEETS_WEBAPP_URL }}
           WEBAPP_TOKEN: ${{ secrets.WEBAPP_TOKEN }}
           # Only the two evening cron entries watch FX14; the morning cron
