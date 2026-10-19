@@ -66,9 +66,10 @@ import csv
 import io
 import json
 import os
+import re
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -433,19 +434,48 @@ def flight_departed_today(rows: list, flight_number: str):
 
     Returns (departed: bool, todays_rows: int).
     """
-    today_str = datetime.now(TAIPEI_TZ).date().strftime("%m/%d/%Y")
+    today = datetime.now(TAIPEI_TZ).date()
     date_i = HEADERS.index("date")
     flt_i = HEADERS.index("departure_flight_number")
     task_cols = [i for i, h in enumerate(HEADERS) if h.startswith("task_")]
+
+    def cell_date(s: str):
+        # The raw CSV export and the sheet don't agree on date formatting
+        # (the sheet displays MM/DD/YYYY; the export is ISO-ish), so accept
+        # both, with or without a time part, rather than string-comparing.
+        s = s.strip()
+        m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", s)
+        if m:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)
+        if m:
+            return date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+        return None
+
+    def flt(s: str):
+        # "14", "014", "FX14", "14.0" -> "14"
+        digits = re.sub(r"\D", "", s.split(".")[0])
+        return digits.lstrip("0")
+
     todays = [
         r for r in rows
-        if r[date_i].strip() == today_str and r[flt_i].strip().lstrip("0") == flight_number.lstrip("0")
+        if cell_date(r[date_i]) == today and flt(r[flt_i]) == flt(flight_number)
     ]
     departed = any(
         ("Pushback (Off blocks)" in r[i] or "ATD (Local)" in r[i])
         for r in todays
         for i in task_cols
     )
+    if todays:
+        sample = todays[0]
+        print(
+            f"(watch) today's FX{flight_number} rows: {len(todays)}; sample date={sample[date_i]!r} "
+            f"flight={sample[flt_i]!r} dep_time={sample[HEADERS.index('dep_time')]!r}"
+        )
+    else:
+        seen_dates = sorted({r[date_i].strip() for r in rows})[-3:]
+        seen_flts = sorted({r[flt_i].strip() for r in rows if cell_date(r[date_i]) == today})
+        print(f"(watch) no FX{flight_number} rows dated {today}; last dates seen={seen_dates}, today's flights={seen_flts}")
     return departed, len(todays)
 
 
