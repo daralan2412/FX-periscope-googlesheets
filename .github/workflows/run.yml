@@ -2,20 +2,36 @@ name: Pull Periscope Ramp Ops (REP-1901) to Google Sheet
 
 on:
   schedule:
-    # Twice a day, Asia/Taipei time (UTC+8, no DST - so this offset is
-    # constant year-round, no seasonal cron drift):
-    #   01:00 UTC = 09:00 Asia/Taipei the same calendar day
-    - cron: '0 1 * * *'
-    #   13:00 UTC = 21:00 (9:00 PM) Asia/Taipei the same calendar day
-    #   (moved from 07:00/19:00 on 2026-09-04: the evening run is the one
-    #   that captures D0, and TPE missions run ~17:00-21:00 local, so 21:00
-    #   catches most of the day's rows; the morning run re-syncs D-1.)
-    - cron: '0 13 * * *'
-  workflow_dispatch: {}
+    # All times Asia/Taipei (UTC+8, no DST, so these offsets never drift).
+    # NOTE: GitHub does not run cron at the exact minute - on this repo the
+    # old :00 crons were consistently firing 3-4.5 h late. Off-the-hour
+    # minutes are used below because the :00/:30 slots are the busiest.
+    #
+    # Morning re-sync of D-1..D-7: 01:07 UTC = 09:07 Asia/Taipei.
+    - cron: '7 1 * * *'
+    #
+    # Evening pull timed ~45 min after FX14's scheduled departure
+    # (changed 2026-10-19; FX14 STD from the sheet: 20:45 TPE Tue-Sat,
+    # 20:55 TPE Mon; no FX14 on Sundays):
+    #   Tue-Sat: 13:31 UTC = 21:31 Asia/Taipei  (STD 20:45 + ~45 min)
+    - cron: '31 13 * * 2-6'
+    #   Mon:     13:41 UTC = 21:41 Asia/Taipei  (STD 20:55 + ~45 min)
+    - cron: '41 13 * * 1'
+    # These two evening entries set WATCH_FLIGHT=14 below: if FX14 has not
+    # pushed back yet when the run lands, the script waits 60 min inside
+    # the same job and pulls once more (see scrape_and_upload.py main()).
+  workflow_dispatch:
+    inputs:
+      watch_flight:
+        description: 'Departure flight to wait for (e.g. 14). Leave empty for a plain one-shot pull.'
+        required: false
+        default: ''
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    # Scrape (~1 min) + optional 60-min wait + second scrape, with headroom.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -32,6 +48,9 @@ jobs:
         env:
           SHEETS_WEBAPP_URL: ${{ secrets.SHEETS_WEBAPP_URL }}
           WEBAPP_TOKEN: ${{ secrets.WEBAPP_TOKEN }}
+          # Only the two evening cron entries watch FX14; the morning cron
+          # and manual runs (unless the input is filled) are one-shot.
+          WATCH_FLIGHT: ${{ (github.event_name == 'schedule' && (github.event.schedule == '31 13 * * 2-6' || github.event.schedule == '41 13 * * 1')) && '14' || inputs.watch_flight }}
         run: python scrape_and_upload.py
 
       - name: Upload debug artifacts on failure
