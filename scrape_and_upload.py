@@ -421,9 +421,37 @@ def post_rows(rows: list):
     return data
 
 
-def main():
-    check_token()
+def flight_departed_today(rows: list, flight_number: str):
+    """Has the given departure flight (e.g. "14" for FX14) pushed back today?
 
+    Looks at today's rows (Asia/Taipei calendar day, column "date" is
+    MM/DD/YYYY) whose departure_flight_number matches, and reports whether
+    any of their task_* cells carries a logged "Pushback (Off blocks)" or
+    "ATD (Local)" task (cells look like "Pushback (Off blocks): 2026-10-19
+    20:46:01.013"). Those two tasks are only ever logged once the aircraft
+    has actually left the gate, so they're the departure signal.
+
+    Returns (departed: bool, todays_rows: int).
+    """
+    today_str = datetime.now(TAIPEI_TZ).date().strftime("%m/%d/%Y")
+    date_i = HEADERS.index("date")
+    flt_i = HEADERS.index("departure_flight_number")
+    task_cols = [i for i, h in enumerate(HEADERS) if h.startswith("task_")]
+    todays = [
+        r for r in rows
+        if r[date_i].strip() == today_str and r[flt_i].strip().lstrip("0") == flight_number.lstrip("0")
+    ]
+    departed = any(
+        ("Pushback (Off blocks)" in r[i] or "ATD (Local)" in r[i])
+        for r in todays
+        for i in task_cols
+    )
+    return departed, len(todays)
+
+
+def scrape_and_post():
+    """One full D-7..D0 pull: scrape (with retries) + POST. Returns the
+    parsed rows (empty list when Periscope had nothing for the window)."""
     start_str, end_str = compute_date_range_mmddyyyy()
     print(f"Pulling Periscope REP-1901 data for {start_str} to {end_str} (D-7 to D0, Asia/Taipei)...")
 
@@ -451,7 +479,7 @@ def main():
 
     if csv_text is None:
         print(f"No rows for {start_str} to {end_str} - nothing to pull. Will retry next run.")
-        return
+        return []
 
     rows = parse_csv_rows(csv_text)
     print(f"Scraped {len(rows)} rows for {start_str} to {end_str}.")
@@ -460,6 +488,44 @@ def main():
     print(
         f"Posted {result.get('rows_received')} rows; "
         f"{result.get('duplicates_removed')} duplicate mission_sas_id row(s) removed on the sheet side."
+    )
+    return rows
+
+
+def main():
+    check_token()
+
+    rows = scrape_and_post()
+
+    # Optional "wait for the flight" mode (added 2026-10-19): the evening
+    # scheduled run is timed to land ~45 min after FX14's STD (20:45 TPE
+    # Tue-Sat, 20:55 Mon). If, at that point, FX14 still hasn't pushed
+    # back - no "Pushback (Off blocks)" / "ATD (Local)" task logged on any
+    # of today's FX14 rows - the flight is running late, so sleep an hour
+    # inside this same job and pull once more, so the sheet ends up with
+    # the departure times instead of waiting for the next morning's run.
+    # WATCH_FLIGHT is the departure flight number to watch ("14"); it is
+    # only set by the evening cron entries in run.yml, never on manual
+    # (workflow_dispatch) or morning runs, so those stay fire-and-forget.
+    watch_flight = os.environ.get("WATCH_FLIGHT", "").strip()
+    if not watch_flight:
+        return
+    retry_delay_min = int(os.environ.get("WATCH_RETRY_MINUTES", "60"))
+
+    departed, n_today = flight_departed_today(rows, watch_flight)
+    if departed:
+        print(f"FX{watch_flight} has departed today ({n_today} mission row(s) for it) - done.")
+        return
+    print(
+        f"FX{watch_flight} has NOT departed yet ({n_today} mission row(s) for it today, "
+        f"none with Pushback/ATD logged). Waiting {retry_delay_min} min, then pulling again..."
+    )
+    time.sleep(retry_delay_min * 60)
+    rows = scrape_and_post()
+    departed, n_today = flight_departed_today(rows, watch_flight)
+    print(
+        f"Second pull done: FX{watch_flight} "
+        + ("has departed." if departed else f"still not departed ({n_today} row(s)); next scheduled run will catch it.")
     )
 
 

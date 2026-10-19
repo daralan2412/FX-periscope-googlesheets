@@ -45,9 +45,16 @@ see version history in `apps-script/Code.gs` if you're curious). Every run
 just re-syncs the trailing 7-day window and lets the dedup step keep things
 clean.
 
-**Schedule**: twice a day, Asia/Taipei time — 9:00 AM and 9:00 PM
-(`.github/workflows/run.yml`; TPE has no DST, so the UTC offset is constant
-year-round).
+**Schedule** (`.github/workflows/run.yml`, Asia/Taipei; TPE has no DST, so
+the UTC offset is constant year-round):
+- 09:07 every day — morning re-sync of D-1..D-7.
+- ~45 min after FX14's scheduled departure, Mon-Sat — 21:31 Tue-Sat (STD
+  20:45), 21:41 Mon (STD 20:55). If FX14 has not pushed back yet when the run
+  lands (no "Pushback (Off blocks)" / "ATD (Local)" logged on today's FX14
+  rows), the job waits 60 min and pulls once more (`WATCH_FLIGHT=14`).
+- GitHub cron is best-effort: expect runs minutes to hours later than the
+  cron minute. Manual runs (Actions > Run workflow) are one-shot unless the
+  `watch_flight` input is filled in.
 
 ## Setup steps
 
@@ -81,7 +88,7 @@ year-round).
    - Actions tab > "Pull Periscope Ramp Ops (REP-1901) to Google Sheet" >
      Run workflow (manual `workflow_dispatch`), rather than waiting for the
      cron, so you can watch the log and check the sheet afterward.
-   - After it succeeds, the twice-daily cron (9am/9pm Asia/Taipei) takes
+   - After it succeeds, the daily crons (09:07 + ~45 min after FX14 departure, Asia/Taipei) take
      over automatically.
 
 ## Known edge case
@@ -101,5 +108,5 @@ posted, so there's nothing to dedupe either.
 - `scrape_and_upload.py` — scrapes REP-1901's rolling D0-to-D-7 CSV export
   (Custom Range, dates computed fresh every run) via Playwright, posts the
   rows to the Web App.
-- `.github/workflows/run.yml` — 9am + 9pm Asia/Taipei cron, plus manual trigger. (Note: GitHub fires cron jobs 2-4 h late on busy days, so expect the actual runs closer to 11am / 11pm.)
+- `.github/workflows/run.yml` — 09:07 Asia/Taipei morning cron + evening cron ~45 min after FX14's STD (with an in-job 60-min retry if FX14 hasn't departed), plus manual trigger. (Note: GitHub fires cron jobs minutes to hours late, so don't read the cron minute as a promise.)
 - `requirements.txt` — `requests`, `playwright`.
