@@ -10,16 +10,23 @@ on:
     # Morning re-sync of D-1..D-7: 01:07 UTC = 09:07 Asia/Taipei.
     - cron: '7 1 * * *'
     #
-    # Evening pull timed ~45 min after FX14's scheduled departure
-    # (changed 2026-10-19; FX14 STD from the sheet: 20:45 TPE Tue-Sat,
-    # 20:55 TPE Mon; no FX14 on Sundays):
-    #   Tue-Sat: 13:31 UTC = 21:31 Asia/Taipei  (STD 20:45 + ~45 min)
-    - cron: '31 13 * * 2-6'
-    #   Mon:     13:41 UTC = 21:41 Asia/Taipei  (STD 20:55 + ~45 min)
-    - cron: '41 13 * * 1'
-    # These two evening entries set WATCH_FLIGHT=14 below: if FX14 has not
-    # pushed back yet when the run lands, the script waits 60 min inside
-    # the same job and pulls once more (see scrape_and_upload.py main()).
+    # Evening pull, target = ~45 min after FX14's scheduled departure
+    # (FX14 STD from the sheet: 20:45 TPE Tue-Sat, 20:55 TPE Mon; no FX14
+    # on Sundays) -> 21:30 / 21:40 Asia/Taipei.
+    #
+    # The cron is deliberately placed HOURS before that: GitHub's cron on
+    # this repo fires 3-5 h late (measured 2026-10-19/20, e.g. the 01:07
+    # UTC cron ran at 05:54 UTC), so a cron at the target minute would
+    # run around 2 AM Taipei. Instead the job starts early and the script
+    # itself sleeps until STD + 45 min (WAIT_FOR_STD=1, see
+    # wait_until_std_plus_offset() in scrape_and_upload.py); GitHub's lag
+    # just eats into that sleep. If GitHub is so late the target has
+    # already passed, the job pulls immediately.
+    #   09:01 UTC = 17:01 Asia/Taipei, Mon-Sat. Worst cases: on-time start
+    #   -> ~4.5 h sleep; 4.5 h late -> starts right at the target.
+    - cron: '1 9 * * 1-6'
+    # After the pull, if FX14 has not pushed back yet, the script waits
+    # 60 min inside the same job and pulls once more (WATCH_FLIGHT=14).
   workflow_dispatch:
     inputs:
       watch_flight:
@@ -30,8 +37,9 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    # Scrape (~1 min) + optional 60-min wait + second scrape, with headroom.
-    timeout-minutes: 150
+    # Evening job = up to ~4.5 h hold + scrape + optional 60-min wait +
+    # second scrape; GitHub's hard cap per job is 360 min.
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -51,9 +59,11 @@ jobs:
           PYTHONUNBUFFERED: '1'
           SHEETS_WEBAPP_URL: ${{ secrets.SHEETS_WEBAPP_URL }}
           WEBAPP_TOKEN: ${{ secrets.WEBAPP_TOKEN }}
-          # Only the two evening cron entries watch FX14; the morning cron
-          # and manual runs (unless the input is filled) are one-shot.
-          WATCH_FLIGHT: ${{ (github.event_name == 'schedule' && (github.event.schedule == '31 13 * * 2-6' || github.event.schedule == '41 13 * * 1')) && '14' || inputs.watch_flight }}
+          # Only the evening cron entry watches FX14 (and holds until STD+45);
+          # the morning cron and manual runs (unless the input is filled)
+          # are one-shot.
+          WATCH_FLIGHT: ${{ (github.event_name == 'schedule' && github.event.schedule == '1 9 * * 1-6') && '14' || inputs.watch_flight }}
+          WAIT_FOR_STD: ${{ (github.event_name == 'schedule' && github.event.schedule == '1 9 * * 1-6') && '1' || '' }}
         run: python scrape_and_upload.py
 
       - name: Upload debug artifacts on failure
