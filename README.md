@@ -48,10 +48,14 @@ clean.
 **Schedule** (`.github/workflows/run.yml`, Asia/Taipei; TPE has no DST, so
 the UTC offset is constant year-round):
 - 09:07 every day — morning re-sync of D-1..D-7.
-- ~45 min after FX14's scheduled departure, Mon-Sat — 21:31 Tue-Sat (STD
-  20:45), 21:41 Mon (STD 20:55). If FX14 has not pushed back yet when the run
-  lands (no "Pushback (Off blocks)" / "ATD (Local)" logged on today's FX14
-  rows), the job waits 60 min and pulls once more (`WATCH_FLIGHT=14`).
+- ~45 min after FX14's scheduled departure, Mon-Sat — 21:30 Tue-Sat (STD
+  20:45), 21:40 Mon (STD 20:55). Because GitHub fires this repo's crons 3-5 h
+  late, the evening cron is set hours early (17:01 TPE) and the job itself
+  sleeps until STD + 45 min before pulling (`WAIT_FOR_STD=1`); if GitHub is so
+  late the target has passed, it pulls immediately. If FX14 has not pushed
+  back yet when it pulls (no "Pushback (Off blocks)" / "ATD (Local)" logged on
+  today's FX14 rows), the job waits 60 min and pulls once more
+  (`WATCH_FLIGHT=14`).
 - GitHub cron is best-effort: expect runs minutes to hours later than the
   cron minute. Manual runs (Actions > Run workflow) are one-shot unless the
   `watch_flight` input is filled in.
@@ -108,5 +112,5 @@ posted, so there's nothing to dedupe either.
 - `scrape_and_upload.py` — scrapes REP-1901's rolling D0-to-D-7 CSV export
   (Custom Range, dates computed fresh every run) via Playwright, posts the
   rows to the Web App.
-- `.github/workflows/run.yml` — 09:07 Asia/Taipei morning cron + evening cron ~45 min after FX14's STD (with an in-job 60-min retry if FX14 hasn't departed), plus manual trigger. (Note: GitHub fires cron jobs minutes to hours late, so don't read the cron minute as a promise.)
+- `.github/workflows/run.yml` — 09:07 Asia/Taipei morning cron + an evening cron at 17:01 TPE whose job holds until FX14's STD + 45 min, pulls, and retries once after 60 min if FX14 hasn't departed; plus manual trigger. (GitHub fires this repo's crons 3-5 h late, which is why the evening job waits for the clock itself.)
 - `requirements.txt` — `requests`, `playwright`.

@@ -522,8 +522,55 @@ def scrape_and_post():
     return rows
 
 
+# FX14 scheduled departure (STD), Asia/Taipei local, by weekday
+# (Monday=0 .. Sunday=6). Taken from the sheet's own dep_time column over
+# Sep-Oct 2026: 20:55 on Mondays, 20:45 Tue-Sat, no FX14 on Sundays.
+FX14_STD_TPE = {0: "20:55", 1: "20:45", 2: "20:45", 3: "20:45", 4: "20:45", 5: "20:45"}
+WAIT_AFTER_STD_MIN = 45
+MAX_PRE_WAIT_S = 5 * 3600  # never sleep longer than this before the first pull
+
+
+def wait_until_std_plus_offset(flight_number: str):
+    """Sleep (inside the job) until today's STD + WAIT_AFTER_STD_MIN, Asia/Taipei.
+
+    Why: GitHub's cron is not a clock. On this repo every scheduled run has
+    been landing 3-5 h after its cron minute (e.g. '7 1 * * *' fired at
+    05:54 UTC on 2026-10-20), so a cron placed AT "STD + 45 min" actually
+    runs around 2 AM Taipei. Instead the evening cron is placed hours
+    early and the job itself waits for the real target time; whatever lag
+    GitHub adds just eats into the sleep. If the job starts after the
+    target (very late cron), it pulls immediately.
+    """
+    now = datetime.now(TAIPEI_TZ)
+    std = FX14_STD_TPE.get(now.weekday())
+    if std is None:
+        print(f"(wait) no FX{flight_number} STD configured for weekday {now.weekday()} - pulling now.")
+        return
+    hh, mm = (int(x) for x in std.split(":"))
+    target = now.replace(hour=hh, minute=mm, second=0, microsecond=0) + timedelta(minutes=WAIT_AFTER_STD_MIN)
+    delay = (target - now).total_seconds()
+    if delay <= 0:
+        print(f"(wait) target {target:%H:%M} TPE (STD {std} + {WAIT_AFTER_STD_MIN} min) already passed "
+              f"by {-delay/60:.0f} min - pulling now.")
+        return
+    if delay > MAX_PRE_WAIT_S:
+        print(f"(wait) target {target:%H:%M} TPE is {delay/3600:.1f} h away; capping the wait at "
+              f"{MAX_PRE_WAIT_S/3600:.0f} h.")
+        delay = MAX_PRE_WAIT_S
+    print(f"(wait) now {now:%H:%M} TPE; sleeping {delay/60:.0f} min until {target:%H:%M} TPE "
+          f"(FX{flight_number} STD {std} + {WAIT_AFTER_STD_MIN} min)...")
+    time.sleep(delay)
+
+
 def main():
     check_token()
+
+    # WAIT_FOR_STD=1 (set by the evening cron in run.yml) makes the job hold
+    # until STD + 45 min Taipei before the first pull - see
+    # wait_until_std_plus_offset() for why the cron can't do this itself.
+    watch_flight = os.environ.get("WATCH_FLIGHT", "").strip()
+    if watch_flight and os.environ.get("WAIT_FOR_STD", "").strip() == "1":
+        wait_until_std_plus_offset(watch_flight)
 
     rows = scrape_and_post()
 
@@ -537,7 +584,6 @@ def main():
     # WATCH_FLIGHT is the departure flight number to watch ("14"); it is
     # only set by the evening cron entries in run.yml, never on manual
     # (workflow_dispatch) or morning runs, so those stay fire-and-forget.
-    watch_flight = os.environ.get("WATCH_FLIGHT", "").strip()
     if not watch_flight:
         return
     retry_delay_min = int(os.environ.get("WATCH_RETRY_MINUTES", "60"))
