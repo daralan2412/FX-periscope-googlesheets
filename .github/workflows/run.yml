@@ -22,9 +22,19 @@ on:
     # wait_until_std_plus_offset() in scrape_and_upload.py); GitHub's lag
     # just eats into that sleep. If GitHub is so late the target has
     # already passed, the job pulls immediately.
-    #   09:01 UTC = 17:01 Asia/Taipei, Mon-Sat. Worst cases: on-time start
-    #   -> ~4.5 h sleep; 4.5 h late -> starts right at the target.
-    - cron: '1 9 * * 1-6'
+    # Several staggered entries, because the lag varies (0-5+ h) and GitHub
+    # sometimes drops a scheduled run outright. Each job, on starting,
+    # looks at the clock: more than 4 h before the target -> exits at
+    # once (leaving it to a later entry); within 4 h -> holds, then
+    # pulls; past the target -> pulls immediately. Two jobs landing in the
+    # window both pull - harmless, the sheet dedupes by mission_sas_id.
+    #   04:01 / 06:01 / 08:01 / 09:31 UTC = 12:01 / 14:01 / 16:01 / 17:31
+    #   Asia/Taipei, Mon-Sat. Covers lags from 0 h (09:31 holds 4 h) up
+    #   to ~9 h (04:01 lands in the window).
+    - cron: '1 4 * * 1-6'
+    - cron: '1 6 * * 1-6'
+    - cron: '1 8 * * 1-6'
+    - cron: '31 9 * * 1-6'
     # After the pull, if FX14 has not pushed back yet, the script waits
     # 60 min inside the same job and pulls once more (WATCH_FLIGHT=14).
   workflow_dispatch:
@@ -37,7 +47,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    # Evening job = up to ~4.5 h hold + scrape + optional 60-min wait +
+    # Evening job = up to 4 h hold + scrape + optional 60-min wait +
     # second scrape; GitHub's hard cap per job is 360 min.
     timeout-minutes: 355
     steps:
@@ -59,11 +69,11 @@ jobs:
           PYTHONUNBUFFERED: '1'
           SHEETS_WEBAPP_URL: ${{ secrets.SHEETS_WEBAPP_URL }}
           WEBAPP_TOKEN: ${{ secrets.WEBAPP_TOKEN }}
-          # Only the evening cron entry watches FX14 (and holds until STD+45);
+          # Only the evening cron entries watch FX14 (and hold until STD+45);
           # the morning cron and manual runs (unless the input is filled)
           # are one-shot.
-          WATCH_FLIGHT: ${{ (github.event_name == 'schedule' && github.event.schedule == '1 9 * * 1-6') && '14' || inputs.watch_flight }}
-          WAIT_FOR_STD: ${{ (github.event_name == 'schedule' && github.event.schedule == '1 9 * * 1-6') && '1' || '' }}
+          WATCH_FLIGHT: ${{ (github.event_name == 'schedule' && contains(fromJSON('["1 4 * * 1-6","1 6 * * 1-6","1 8 * * 1-6","31 9 * * 1-6"]'), github.event.schedule)) && '14' || inputs.watch_flight }}
+          WAIT_FOR_STD: ${{ (github.event_name == 'schedule' && contains(fromJSON('["1 4 * * 1-6","1 6 * * 1-6","1 8 * * 1-6","31 9 * * 1-6"]'), github.event.schedule)) && '1' || '' }}
         run: python scrape_and_upload.py
 
       - name: Upload debug artifacts on failure
