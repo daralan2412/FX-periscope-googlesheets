@@ -527,11 +527,20 @@ def scrape_and_post():
 # Sep-Oct 2026: 20:55 on Mondays, 20:45 Tue-Sat, no FX14 on Sundays.
 FX14_STD_TPE = {0: "20:55", 1: "20:45", 2: "20:45", 3: "20:45", 4: "20:45", 5: "20:45"}
 WAIT_AFTER_STD_MIN = 45
-MAX_PRE_WAIT_S = 5 * 3600  # never sleep longer than this before the first pull
+# Longest hold before the first pull. Sized so hold + pull (up to 3 scrape
+# attempts, ~20 min worst case) + the 60-min "not departed" retry + second
+# pull stays under GitHub's 6-hour job cap - run #134 (2026-10-26) was
+# cancelled at 5 h 56 min with a 5 h hold. A job that starts earlier than
+# this before the target simply exits and leaves the pull to one of the
+# later cron entries (see run.yml).
+MAX_PRE_WAIT_S = 4 * 3600
 
 
 def wait_until_std_plus_offset(flight_number: str):
     """Sleep (inside the job) until today's STD + WAIT_AFTER_STD_MIN, Asia/Taipei.
+
+    Returns True when the caller should go ahead and pull, False when this
+    job started too early and should exit without pulling.
 
     Why: GitHub's cron is not a clock. On this repo every scheduled run has
     been landing 3-5 h after its cron minute (e.g. '7 1 * * *' fired at
@@ -545,21 +554,22 @@ def wait_until_std_plus_offset(flight_number: str):
     std = FX14_STD_TPE.get(now.weekday())
     if std is None:
         print(f"(wait) no FX{flight_number} STD configured for weekday {now.weekday()} - pulling now.")
-        return
+        return True
     hh, mm = (int(x) for x in std.split(":"))
     target = now.replace(hour=hh, minute=mm, second=0, microsecond=0) + timedelta(minutes=WAIT_AFTER_STD_MIN)
     delay = (target - now).total_seconds()
     if delay <= 0:
         print(f"(wait) target {target:%H:%M} TPE (STD {std} + {WAIT_AFTER_STD_MIN} min) already passed "
               f"by {-delay/60:.0f} min - pulling now.")
-        return
+        return True
     if delay > MAX_PRE_WAIT_S:
-        print(f"(wait) target {target:%H:%M} TPE is {delay/3600:.1f} h away; capping the wait at "
-              f"{MAX_PRE_WAIT_S/3600:.0f} h.")
-        delay = MAX_PRE_WAIT_S
+        print(f"(wait) target {target:%H:%M} TPE is {delay/3600:.1f} h away - too early for this job "
+              f"(max hold {MAX_PRE_WAIT_S/3600:.2f} h); exiting and leaving it to a later scheduled run.")
+        return False
     print(f"(wait) now {now:%H:%M} TPE; sleeping {delay/60:.0f} min until {target:%H:%M} TPE "
           f"(FX{flight_number} STD {std} + {WAIT_AFTER_STD_MIN} min)...")
     time.sleep(delay)
+    return True
 
 
 def main():
@@ -570,7 +580,8 @@ def main():
     # wait_until_std_plus_offset() for why the cron can't do this itself.
     watch_flight = os.environ.get("WATCH_FLIGHT", "").strip()
     if watch_flight and os.environ.get("WAIT_FOR_STD", "").strip() == "1":
-        wait_until_std_plus_offset(watch_flight)
+        if not wait_until_std_plus_offset(watch_flight):
+            return
 
     rows = scrape_and_post()
 
